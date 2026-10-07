@@ -8,7 +8,7 @@ Ansible project that turns a Raspberry Pi 5 running Kali Linux (arm64) into a LA
 |---|---|
 | `base` | apt full-upgrade, timezone, zram swap (zstd, ~50% RAM), nftables default-deny firewall, optional SSH hardening |
 | `docker` | Docker CE from Docker's apt repo (not `docker.io`), buildx and compose plugins |
-| `n8n` | Node.js from NodeSource, n8n pinned via npm, `n8n` system user, systemd unit, env file, scoped sudoers, Caddy reverse proxy |
+| `n8n` | Node.js from NodeSource, n8n pinned via npm, Python task runner, `n8n` system user, systemd unit, env file, scoped sudoers, Caddy reverse proxy |
 | `tooling` | Kali tool packages, qemu binfmt handlers for amd64 emulation, nuclei templates |
 
 ## Requirements
@@ -57,6 +57,8 @@ All tunables live in `group_vars/all.yaml`. Defaults and comments are in `group_
 | `n8n_sudo_commands` | Full paths the service user may run with `sudo -n`. Defaults to nmap, masscan, naabu. |
 | `n8n_nodes_exclude` | Value of `NODES_EXCLUDE`. `[]` re-enables Execute Command, Read/Write Files and Local File Trigger. |
 | `n8n_version`, `nodejs_major` | Pinned n8n release and Node.js major. n8n 2.42 needs Node.js 24 or later. |
+| `uv_version`, `n8n_py_runner_python` | uv release and interpreter used to build the Python task runner. |
+| `n8n_py_stdlib_allow`, `n8n_py_external_allow` | Import allowlists for the Python Code node. Stdlib defaults to `*`, external packages to none. |
 | `kali_tool_packages` | Kali packages installed for use from Execute Command. |
 | `binfmt_image` | Pinned image that registers qemu handlers. |
 | `docker_apt_codename` | Debian codename for Docker's repo. Kali's own codename is not published by Docker. |
@@ -107,6 +109,8 @@ sudo -u n8n sudo -n nmap -sS -p 22 127.0.0.1
 In the editor, confirm Execute Command shows up in the node panel and can run `nmap --version`.
 
 ## Troubleshooting
+
+**Python Code node says the runner is unavailable.** The npm package does not ship n8n's Python runner, so the playbook builds it from the n8n source tag into the global node_modules directory. Check that `.venv/bin/python` exists under `@n8n/task-runner-python` there, and re-run the playbook.
 
 **Execute Command is missing from the node panel.** Check that `NODES_EXCLUDE=[]` is in `/etc/n8n/n8n.env` and restart n8n.
 

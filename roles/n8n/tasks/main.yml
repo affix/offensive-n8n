@@ -52,6 +52,8 @@
     name:
       - build-essential
       - python3
+      - python3.13
+      - git
     state: present
     update_cache: "{{ nodesource_repo is changed }}"
 
@@ -153,6 +155,147 @@
     - node_major_before.rc == 0
     - node_major_before.stdout != nodejs_major | string
   notify: Restart n8n
+
+# --- Python task runner (internal mode) -------------------------------------
+# The n8n npm package does not ship the Python runner; n8n's Docker images build
+# it separately. n8n expects it at <npm root>/@n8n/task-runner-python with a
+# .venv inside, and runs `python -m src.main` from that directory.
+
+- name: Expose the Python runner directory as a fact
+  ansible.builtin.set_fact:
+    n8n_py_runner_dir: "{{ npm_root.stdout | trim }}/@n8n/task-runner-python"
+
+- name: Read the installed uv version
+  ansible.builtin.command:
+    argv: [/usr/local/bin/uv, --version]
+  register: uv_installed
+  changed_when: false
+  failed_when: false
+
+- name: Install uv at the pinned version
+  when: uv_installed.rc != 0 or uv_version not in uv_installed.stdout
+  block:
+    - name: Create a scratch directory for the uv download
+      ansible.builtin.tempfile:
+        state: directory
+      register: uv_tmp
+
+    - name: Download the uv release (checksum verified)
+      ansible.builtin.get_url:
+        url: "https://github.com/astral-sh/uv/releases/download/{{ uv_version }}/uv-aarch64-unknown-linux-gnu.tar.gz"
+        checksum: "sha256:https://github.com/astral-sh/uv/releases/download/{{ uv_version }}/uv-aarch64-unknown-linux-gnu.tar.gz.sha256"
+        dest: "{{ uv_tmp.path }}/uv.tar.gz"
+        mode: "0644"
+
+    - name: Unpack uv
+      ansible.builtin.unarchive:
+        src: "{{ uv_tmp.path }}/uv.tar.gz"
+        dest: "{{ uv_tmp.path }}"
+        remote_src: true
+
+    - name: Install the uv binary
+      ansible.builtin.copy:
+        src: "{{ uv_tmp.path }}/uv-aarch64-unknown-linux-gnu/uv"
+        dest: /usr/local/bin/uv
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+  always:
+    - name: Remove the uv scratch directory
+      ansible.builtin.file:
+        path: "{{ uv_tmp.path }}"
+        state: absent
+      when: uv_tmp.path is defined
+
+- name: Read the Python runner's source version marker
+  ansible.builtin.command:
+    argv: [cat, "{{ n8n_py_runner_dir }}/.n8n-version"]
+  register: py_runner_marker
+  changed_when: false
+  failed_when: false
+
+# Rebuilt only when the pinned n8n version changes, so the runner always
+# matches the n8n it talks to.
+- name: Build the Python task runner for this n8n version
+  when: py_runner_marker.stdout | default('') | trim != n8n_version
+  notify: Restart n8n
+  block:
+    - name: Create a scratch directory for the runner source
+      ansible.builtin.tempfile:
+        state: directory
+      register: py_runner_tmp
+
+    - name: Sparse-clone n8n at the pinned release tag
+      ansible.builtin.command:
+        argv:
+          - git
+          - clone
+          - --quiet
+          - --depth=1
+          - --filter=blob:none
+          - --sparse
+          - --branch
+          - "n8n@{{ n8n_version }}"
+          - https://github.com/n8n-io/n8n.git
+          - "{{ py_runner_tmp.path }}/n8n"
+
+    - name: Check out only the Python runner package
+      ansible.builtin.command:
+        argv:
+          - git
+          - -C
+          - "{{ py_runner_tmp.path }}/n8n"
+          - sparse-checkout
+          - set
+          - packages/@n8n/task-runner-python
+
+    - name: Remove any previous Python runner
+      ansible.builtin.file:
+        path: "{{ n8n_py_runner_dir }}"
+        state: absent
+
+    - name: Install the Python runner source
+      ansible.builtin.copy:
+        src: "{{ py_runner_tmp.path }}/n8n/packages/@n8n/task-runner-python/"
+        dest: "{{ n8n_py_runner_dir }}/"
+        remote_src: true
+        owner: root
+        group: root
+        mode: preserve
+        directory_mode: "0755"
+
+    # Same sync n8n's runners image uses, against the distro Python the
+    # runner is pinned to. Copy mode keeps the venv independent of root's cache.
+    - name: Build the Python runner virtual environment
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/uv
+          - sync
+          - --frozen
+          - --no-dev
+          - --all-extras
+          - --no-editable
+          - --python
+          - "{{ n8n_py_runner_python }}"
+        chdir: "{{ n8n_py_runner_dir }}"
+      environment:
+        UV_PYTHON_DOWNLOADS: never
+        UV_LINK_MODE: copy
+
+    - name: Record the n8n version the runner was built for
+      ansible.builtin.copy:
+        dest: "{{ n8n_py_runner_dir }}/.n8n-version"
+        content: "{{ n8n_version }}\n"
+        owner: root
+        group: root
+        mode: "0644"
+  always:
+    - name: Remove the runner scratch directory
+      ansible.builtin.file:
+        path: "{{ py_runner_tmp.path }}"
+        state: absent
+      when: py_runner_tmp.path is defined
 
 - name: Resolve the global npm prefix
   ansible.builtin.command:

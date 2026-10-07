@@ -78,6 +78,19 @@ n8n_version: "2.42.3"
 # Node.js major from NodeSource. n8n 2.42 refuses to start below Node.js 24.
 nodejs_major: 24
 
+# uv release used to build the Python task runner's venv (matches n8n's
+# runners image).
+uv_version: "0.8.14"
+
+# Interpreter for the Python task runner. The runner pins Python 3.13.
+n8n_py_runner_python: "/usr/bin/python3.13"
+
+# Python Code node import allowlists. "*" allows the whole stdlib; the
+# Execute Command node already gives a shell, so this widens nothing.
+# External packages stay off unless listed (and installed in the runner venv).
+n8n_py_stdlib_allow: "*"
+n8n_py_external_allow: ""
+
 # Kali-native tool packages installed on the host for the Execute Command node.
 # Keep to packages that exist in kali-rolling for arm64.
 kali_tool_packages:
