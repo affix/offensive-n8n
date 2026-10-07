@@ -45,6 +45,7 @@
     argv: [node, -p, "process.versions.node.split('.')[0]"]
   register: node_major_before
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Install native-module build prerequisites
@@ -141,6 +142,7 @@
     cmd: npm root -g
   register: npm_root
   changed_when: false
+  check_mode: false
 
 # Native modules (isolated-vm, sqlite3) are built against one Node.js ABI. When
 # the major changed underneath an existing install, rebuild them in place.
@@ -153,6 +155,7 @@
     CXXFLAGS: "-include cstdint"
   when:
     - node_major_before.rc == 0
+    - node_major_before.stdout | length > 0
     - node_major_before.stdout != nodejs_major | string
   notify: Restart n8n
 
@@ -170,6 +173,7 @@
     argv: [/usr/local/bin/uv, --version]
   register: uv_installed
   changed_when: false
+  check_mode: false
   failed_when: false
 
 - name: Install uv at the pinned version
@@ -213,6 +217,7 @@
     argv: [cat, "{{ n8n_py_runner_dir }}/.n8n-version"]
   register: py_runner_marker
   changed_when: false
+  check_mode: false
   failed_when: false
 
 # Rebuilt only when the pinned n8n version changes, so the runner always
@@ -302,6 +307,7 @@
     cmd: npm prefix -g
   register: npm_prefix
   changed_when: false
+  check_mode: false
 
 - name: Expose the n8n binary path as a fact
   ansible.builtin.set_fact:
