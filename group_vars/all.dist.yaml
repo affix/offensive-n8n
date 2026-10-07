@@ -70,8 +70,8 @@ n8n_nodes_exclude: "[]"
 # n8n version installed globally with npm.
 n8n_version: "2.42.3"
 
-# Node.js major from NodeSource. n8n 2.x supports 20.19 through 24.x.
-nodejs_major: 22
+# Node.js major from NodeSource. n8n 2.42 refuses to start below Node.js 24.
+nodejs_major: 24
 
 # Kali-native tool packages installed on the host for the Execute Command node.
 # Keep to packages that exist in kali-rolling for arm64.

@@ -15,15 +15,17 @@
     mode: "0644"
 
 # NodeSource publishes a distro-agnostic suite ("nodistro"), so Kali's own
-# codename is not a problem here.
+# codename is not a problem here. Written whole (not apt_repository) so a
+# change of nodejs_major replaces the old major's line instead of adding one.
 - name: Add the NodeSource apt repository
-  ansible.builtin.apt_repository:
-    repo: >-
-      deb [arch=arm64 signed-by=/etc/apt/keyrings/nodesource.asc]
-      https://deb.nodesource.com/node_{{ nodejs_major }}.x nodistro main
-    filename: nodesource
-    state: present
-    update_cache: true
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/nodesource.list
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      deb [arch=arm64 signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_{{ nodejs_major }}.x nodistro main
+  register: nodesource_repo
 
 # Kali ships its own nodejs. Pin NodeSource above it so apt never swaps the
 # runtime under n8n on a routine upgrade.
@@ -38,13 +40,28 @@
       Pin: origin deb.nodesource.com
       Pin-Priority: 1001
 
-- name: Install Node.js and native-module build prerequisites
+- name: Read the installed Node.js major
+  ansible.builtin.command:
+    argv: [node, -p, "process.versions.node.split('.')[0]"]
+  register: node_major_before
+  changed_when: false
+  failed_when: false
+
+- name: Install native-module build prerequisites
   ansible.builtin.apt:
     name:
-      - nodejs
       - build-essential
       - python3
     state: present
+    update_cache: "{{ nodesource_repo is changed }}"
+
+# `latest` only when the installed major differs from nodejs_major, so a
+# routine run never moves Node.js and a major bump actually upgrades it.
+- name: Install Node.js at the pinned major
+  ansible.builtin.apt:
+    name: nodejs
+    state: "{{ 'present' if node_major_before.stdout | default('') == nodejs_major | string else 'latest' }}"
+    update_cache: "{{ nodesource_repo is changed }}"
 
 # --- Service user and directories ------------------------------------------
 
@@ -103,6 +120,9 @@
 
 # --- n8n (pinned, global npm install) ---------------------------------------
 
+# isolated-vm has no arm64 prebuild and compiles from source. Its headers use
+# uint32_t without including <cstdint>, which GCC 15+ no longer pulls in
+# transitively, so force-include it.
 - name: Install n8n globally at the pinned version
   community.general.npm:
     name: n8n
@@ -111,6 +131,27 @@
     state: present
   environment:
     NODE_ENV: production
+    CXXFLAGS: "-include cstdint"
+  notify: Restart n8n
+
+- name: Resolve the global node_modules directory
+  ansible.builtin.command:
+    cmd: npm root -g
+  register: npm_root
+  changed_when: false
+
+# Native modules (isolated-vm, sqlite3) are built against one Node.js ABI. When
+# the major changed underneath an existing install, rebuild them in place.
+- name: Rebuild n8n native modules after a Node.js major change
+  ansible.builtin.command:
+    cmd: npm rebuild
+    chdir: "{{ npm_root.stdout | trim }}/n8n"
+  environment:
+    NODE_ENV: production
+    CXXFLAGS: "-include cstdint"
+  when:
+    - node_major_before.rc == 0
+    - node_major_before.stdout != nodejs_major | string
   notify: Restart n8n
 
 - name: Resolve the global npm prefix

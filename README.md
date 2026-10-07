@@ -55,7 +55,7 @@ All tunables live in `group_vars/all.yaml`. Defaults and comments are in `group_
 | `n8n_user`, `n8n_group` | Service account. Member of the `docker` group. |
 | `n8n_sudo_commands` | Full paths the service user may run with `sudo -n`. Defaults to nmap, masscan, naabu. |
 | `n8n_nodes_exclude` | Value of `NODES_EXCLUDE`. `[]` re-enables Execute Command, Read/Write Files and Local File Trigger. |
-| `n8n_version`, `nodejs_major` | Pinned n8n release and Node.js major (n8n 2.x supports 20.19 to 24.x). |
+| `n8n_version`, `nodejs_major` | Pinned n8n release and Node.js major. n8n 2.42 needs Node.js 24 or later. |
 | `kali_tool_packages` | Kali packages installed for use from Execute Command. |
 | `binfmt_image` | Pinned image that registers qemu handlers. |
 | `docker_apt_codename` | Debian codename for Docker's repo. Kali's own codename is not published by Docker. |
@@ -109,4 +109,4 @@ In the editor, confirm Execute Command shows up in the node panel and can run `n
 
 **Execute Command is missing from the node panel.** Check that `NODES_EXCLUDE=[]` is in `/etc/n8n/n8n.env` and restart n8n.
 
-**n8n fails to start after an upgrade.** Check `journalctl -u n8n`. A Node.js major outside n8n's supported range is the usual cause. Pin `nodejs_major` back and re-run.
+**n8n fails to start after an upgrade.** Check `journalctl -u n8n`. A Node.js major outside n8n's supported range is the usual cause, and n8n logs the range it wants. Set `nodejs_major` to match and re-run; the playbook upgrades Node.js and rebuilds n8n's native modules.
