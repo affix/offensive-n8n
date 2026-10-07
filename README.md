@@ -48,7 +48,8 @@ All tunables live in `group_vars/all.yaml`. Defaults and comments are in `group_
 | `n8n_bind_ip` | The only address n8n and Caddy listen on. `127.0.0.1` makes it on-box only. |
 | `n8n_port` | n8n listen port, default 5678. |
 | `n8n_hostname`, `caddy_http_port` | Internal Caddy vhost and its port. |
-| `n8n_public_host`, `n8n_public_url` | External URL n8n advertises for the editor and webhooks. |
+| `n8n_behind_proxy`, `n8n_proxy_hops` | Whether an external reverse proxy fronts n8n, and how many proxy hops to trust. Off by default, so n8n advertises its own LAN address. |
+| `n8n_public_host`, `n8n_public_url` | External URL n8n advertises for the editor and webhooks when `n8n_behind_proxy` is true. |
 | `lan_mgmt_cidr` | Only source range allowed inbound to SSH, n8n and Caddy. |
 | `n8n_proxy_cidrs` | Extra sources allowed to the n8n port only, such as a remote reverse proxy arriving over a tunnel. Empty by default. |
 | `n8n_dir`, `n8n_data_dir` | Install dir (also the service user's home and `N8N_USER_FOLDER`) and state dir. |
@@ -115,3 +116,7 @@ In the editor, confirm Execute Command shows up in the node panel and can run `n
 **Execute Command is missing from the node panel.** Check that `NODES_EXCLUDE=[]` is in `/etc/n8n/n8n.env` and restart n8n.
 
 **n8n fails to start after an upgrade.** Check `journalctl -u n8n`. A Node.js major outside n8n's supported range is the usual cause, and n8n logs the range it wants. Set `nodejs_major` to match and re-run; the playbook upgrades Node.js and rebuilds n8n's native modules.
+
+## Licence
+
+MIT. See `LICENSE`.

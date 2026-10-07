@@ -19,7 +19,14 @@ n8n_port: 5678
 n8n_hostname: "n8n.lan.example.com"
 caddy_http_port: 80
 
-# Public URL n8n advertises for the editor and webhooks. This is the external
+# Set true when n8n sits behind an external reverse proxy (e.g. TLS on another
+# host). n8n then advertises n8n_public_url for editor links and webhooks and
+# trusts n8n_proxy_hops proxies' X-Forwarded-* headers. When false, n8n
+# advertises http://n8n_bind_ip:n8n_port and the two settings below are unused.
+n8n_behind_proxy: false
+n8n_proxy_hops: 1
+
+# Public URL n8n advertises when n8n_behind_proxy is true. This is the external
 # front door (e.g. a TLS reverse proxy), NOT the on-box Caddy vhost. Webhook
 # URLs and editor links n8n generates use this.
 n8n_public_host: "n8n.example.com"
