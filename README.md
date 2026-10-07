@@ -1,4 +1,6 @@
-# n8n on Kali
+<p align="center">
+  <img src="assets/logo.png" alt="Offensive N8N" width="600">
+</p>
 
 Ansible project that turns a Kali Linux machine, arm64 or amd64, into a LAN-only n8n box for offensive workflows. n8n runs natively on the host under systemd, not in Docker, so the Execute Command node can run Kali's own tools directly. Docker is still installed for running tool containers on demand.
 
