@@ -1,6 +1,6 @@
-# n8n on a Kali Pi
+# n8n on Kali
 
-Ansible project that turns a Raspberry Pi 5 running Kali Linux (arm64) into a LAN-only n8n box for offensive workflows. n8n runs natively on the host under systemd, not in Docker, so the Execute Command node can run Kali's own tools directly. Docker is still installed for running tool containers on demand.
+Ansible project that turns a Kali Linux machine, arm64 or amd64, into a LAN-only n8n box for offensive workflows. n8n runs natively on the host under systemd, not in Docker, so the Execute Command node can run Kali's own tools directly. Docker is still installed for running tool containers on demand.
 
 ## What gets deployed
 
@@ -9,11 +9,11 @@ Ansible project that turns a Raspberry Pi 5 running Kali Linux (arm64) into a LA
 | `base` | apt full-upgrade, timezone, zram swap (zstd, ~50% RAM), nftables default-deny firewall, optional SSH hardening |
 | `docker` | Docker CE from Docker's apt repo (not `docker.io`), buildx and compose plugins |
 | `n8n` | Node.js from NodeSource, n8n pinned via npm, Python task runner, `n8n` system user, systemd unit, env file, scoped sudoers, Caddy reverse proxy |
-| `tooling` | Kali tool packages, qemu binfmt handlers for amd64 emulation, nuclei templates |
+| `tooling` | Kali tool packages, qemu binfmt handlers for amd64 emulation on arm64 hosts, nuclei templates |
 
 ## Requirements
 
-- Pi 5 on Kali arm64, reachable over SSH with key auth as a sudo user.
+- Kali on arm64 or amd64 with systemd, reachable over SSH with key auth as a sudo user. A Raspberry Pi 5 works well; so does an amd64 VM or server. **32-bit ARM, WSL and containers are not supported.**
 - Ansible on the control node.
 
 ```
@@ -95,7 +95,7 @@ docker run --rm -v /opt/loot:/loot projectdiscovery/katana:v1.8.0 -u https://exa
 
 - n8n and Caddy bind `n8n_bind_ip` only. Nothing listens on `0.0.0.0`.
 - nftables drops all inbound traffic except loopback, established flows, ICMP, SSH, n8n and Caddy from `lan_mgmt_cidr`, and the n8n port from `n8n_proxy_cidrs`.
-- The `n8n` user is root-equivalent. It runs arbitrary host commands, is in the `docker` group, and has passwordless sudo for scanners. Anyone with an n8n login effectively has root on the Pi. Never expose this box beyond the LAN.
+- The `n8n` user is root-equivalent. It runs arbitrary host commands, is in the `docker` group, and has passwordless sudo for scanners. Anyone with an n8n login effectively has root on the host. Never expose this box beyond the LAN.
 - The systemd unit deliberately has no sandboxing directives, because they would cut Execute Command off from the host.
 
 ## Checking it works

@@ -1,9 +1,9 @@
 ---
-# Copy to inventory.yaml and set your Pi's address and SSH user.
-# inventory.yaml is gitignored.
-pi:
+# Copy to inventory.yaml and set your Kali host's address and SSH user.
+# inventory.yaml is gitignored. The group must be named n8n.
+n8n:
   hosts:
-    pi:
+    kali:
       ansible_host: 192.168.1.10
       ansible_user: kali
   vars:

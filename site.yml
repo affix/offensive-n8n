@@ -1,7 +1,23 @@
 ---
-- name: Provision Kali Pi as a local-only n8n offensive orchestrator
-  hosts: pi
+- name: Provision Kali as a local-only n8n offensive orchestrator
+  hosts: n8n
   become: true
+  vars:
+    # Debian package architecture and uv release triple for this host, derived
+    # from the gathered facts. Supported: arm64 (e.g. Raspberry Pi 5) and amd64.
+    supported_architectures:
+      aarch64: { deb: arm64, uv: aarch64-unknown-linux-gnu }
+      x86_64: { deb: amd64, uv: x86_64-unknown-linux-gnu }
+    deb_arch: "{{ supported_architectures[ansible_architecture].deb }}"
+    uv_triple: "{{ supported_architectures[ansible_architecture].uv }}"
+  pre_tasks:
+    - name: Check the host architecture is supported
+      ansible.builtin.assert:
+        that: ansible_architecture in supported_architectures
+        fail_msg: >-
+          Unsupported architecture {{ ansible_architecture }}. This playbook
+          supports {{ supported_architectures.keys() | join(' and ') }} Kali.
+        quiet: true
   roles:
     - base
     - docker

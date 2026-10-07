@@ -1,13 +1,13 @@
 ---
 # Copy to group_vars/all.yaml and set your values. all.yaml is gitignored.
 # ----------------------------------------------------------------------------
-# All tunables for the n8n-on-Kali-Pi build. Every image reference is pinned to
+# All tunables for the n8n-on-Kali build. Every image reference is pinned to
 # an explicit tag. `latest` is prohibited anywhere in this project.
 # ----------------------------------------------------------------------------
 
 # --- Network / exposure -----------------------------------------------------
 
-# LAN address n8n binds to. Set to the Pi's LAN IP to reach it from other hosts.
+# LAN address n8n binds to. Set to the host's LAN IP to reach it from other hosts.
 # Use 127.0.0.1 to make n8n reachable on-box only (no LAN exposure at all).
 n8n_bind_ip: "192.168.1.10"
 
@@ -15,7 +15,7 @@ n8n_bind_ip: "192.168.1.10"
 n8n_port: 5678
 
 # Caddy reverse proxy: the vhost it serves and the host port it publishes.
-# n8n is reached as http://{{ n8n_hostname }} once DNS points this name at the Pi.
+# n8n is reached as http://{{ n8n_hostname }} once DNS points this name at the host.
 n8n_hostname: "n8n.lan.example.com"
 caddy_http_port: 80
 
@@ -99,7 +99,7 @@ n8n_py_stdlib_allow: "*"
 n8n_py_external_allow: ""
 
 # Kali-native tool packages installed on the host for the Execute Command node.
-# Keep to packages that exist in kali-rolling for arm64.
+# Keep to packages kali-rolling ships for both arm64 and amd64.
 kali_tool_packages:
   - nmap
   - masscan

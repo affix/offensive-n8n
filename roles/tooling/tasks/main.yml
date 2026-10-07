@@ -1,25 +1,28 @@
 ---
-# Host-native Kali tools for the Execute Command node, cross-arch emulation,
-# and nuclei templates.
+# Host-native Kali tools for the Execute Command node, cross-arch emulation on
+# non-amd64 hosts, and nuclei templates.
 
 - name: Install Kali-native tool packages
   ansible.builtin.apt:
     name: "{{ kali_tool_packages }}"
     state: present
 
+# Cross-arch emulation so amd64-only tool images run on arm64 hosts. Skipped on
+# amd64, where those images already run natively.
 - name: Install qemu-user-static and binfmt-support
   ansible.builtin.apt:
     name:
       - qemu-user-static
       - binfmt-support
     state: present
+  when: deb_arch != 'amd64'
 
-# Register cross-arch handlers so amd64-only tools run under emulation.
 # Idempotent: only runs when the x86_64 handler is not already registered.
 - name: Check whether the amd64 (x86_64) binfmt handler is registered
   ansible.builtin.stat:
     path: /proc/sys/fs/binfmt_misc/qemu-x86_64
   register: binfmt_x86_64
+  when: deb_arch != 'amd64'
 
 - name: Register cross-arch binfmt handlers via the pinned binfmt image
   community.docker.docker_container:
@@ -30,7 +33,7 @@
     detach: false
     auto_remove: true
     cleanup: true
-  when: not binfmt_x86_64.stat.exists
+  when: deb_arch != 'amd64' and not binfmt_x86_64.stat.exists
 
 - name: Create the nuclei templates directory
   ansible.builtin.file:
