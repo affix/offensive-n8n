@@ -19,6 +19,11 @@ table inet filter {
         ip saddr {{ lan_mgmt_cidr }} tcp dport 22 accept
         ip saddr {{ lan_mgmt_cidr }} tcp dport {{ n8n_port }} accept
         ip saddr {{ lan_mgmt_cidr }} tcp dport {{ caddy_http_port }} accept
+{% if n8n_proxy_cidrs | length > 0 %}
+
+        # Remote reverse proxy sources, n8n port only.
+        ip saddr { {{ n8n_proxy_cidrs | join(', ') }} } tcp dport {{ n8n_port }} accept
+{% endif %}
 
         # Containers reach host-bound services on any port.
         # n8n already holds the Docker socket, so this crosses no boundary.

@@ -29,6 +29,11 @@ n8n_public_url: "https://n8n.example.com"
 # Caddy HTTP port. Everything else is dropped by the default-deny firewall.
 lan_mgmt_cidr: "192.168.1.0/24"
 
+# Extra sources allowed to reach the n8n port only (not SSH or Caddy), e.g. the
+# address a remote reverse proxy's traffic arrives from over a tunnel. Use the
+# narrowest CIDR possible. Empty list adds no rule.
+n8n_proxy_cidrs: []
+
 # Timezone applied to the host and exported to the n8n service.
 timezone: "Europe/London"
 

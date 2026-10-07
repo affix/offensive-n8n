@@ -50,6 +50,7 @@ All tunables live in `group_vars/all.yaml`. Defaults and comments are in `group_
 | `n8n_hostname`, `caddy_http_port` | Internal Caddy vhost and its port. |
 | `n8n_public_host`, `n8n_public_url` | External URL n8n advertises for the editor and webhooks. |
 | `lan_mgmt_cidr` | Only source range allowed inbound to SSH, n8n and Caddy. |
+| `n8n_proxy_cidrs` | Extra sources allowed to the n8n port only, such as a remote reverse proxy arriving over a tunnel. Empty by default. |
 | `n8n_dir`, `n8n_data_dir` | Install dir (also the service user's home and `N8N_USER_FOLDER`) and state dir. |
 | `loot_dir` | Output dir. The only path the Read/Write Files node can touch. |
 | `n8n_user`, `n8n_group` | Service account. Member of the `docker` group. |
@@ -90,7 +91,7 @@ docker run --rm -v /opt/loot:/loot projectdiscovery/katana:v1.8.0 -u https://exa
 ## Security model
 
 - n8n and Caddy bind `n8n_bind_ip` only. Nothing listens on `0.0.0.0`.
-- nftables drops all inbound traffic except loopback, established flows, ICMP, and SSH, n8n and Caddy from `lan_mgmt_cidr`.
+- nftables drops all inbound traffic except loopback, established flows, ICMP, SSH, n8n and Caddy from `lan_mgmt_cidr`, and the n8n port from `n8n_proxy_cidrs`.
 - The `n8n` user is root-equivalent. It runs arbitrary host commands, is in the `docker` group, and has passwordless sudo for scanners. Anyone with an n8n login effectively has root on the Pi. Never expose this box beyond the LAN.
 - The systemd unit deliberately has no sandboxing directives, because they would cut Execute Command off from the host.
 
