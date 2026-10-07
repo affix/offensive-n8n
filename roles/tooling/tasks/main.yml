@@ -1,0 +1,55 @@
+---
+# Host-native Kali tools for the Execute Command node, cross-arch emulation,
+# and nuclei templates.
+
+- name: Install Kali-native tool packages
+  ansible.builtin.apt:
+    name: "{{ kali_tool_packages }}"
+    state: present
+
+- name: Install qemu-user-static and binfmt-support
+  ansible.builtin.apt:
+    name:
+      - qemu-user-static
+      - binfmt-support
+    state: present
+
+# Register cross-arch handlers so amd64-only tools run under emulation.
+# Idempotent: only runs when the x86_64 handler is not already registered.
+- name: Check whether the amd64 (x86_64) binfmt handler is registered
+  ansible.builtin.stat:
+    path: /proc/sys/fs/binfmt_misc/qemu-x86_64
+  register: binfmt_x86_64
+
+- name: Register cross-arch binfmt handlers via the pinned binfmt image
+  community.docker.docker_container:
+    name: binfmt-install
+    image: "{{ binfmt_image }}"
+    privileged: true
+    command: "--install all"
+    detach: false
+    auto_remove: true
+    cleanup: true
+  when: not binfmt_x86_64.stat.exists
+
+- name: Create the nuclei templates directory
+  ansible.builtin.file:
+    path: "{{ nuclei_templates_dir }}"
+    state: directory
+    owner: "{{ n8n_user }}"
+    group: "{{ n8n_group }}"
+    mode: "0755"
+
+# Refresh with the host nuclei, as the service user, so the templates and
+# nuclei's own config under $HOME are owned by the user that will run scans.
+- name: Refresh nuclei templates into the persisted directory
+  ansible.builtin.command:
+    argv:
+      - nuclei
+      - -update-templates
+      - -update-template-dir
+      - "{{ nuclei_templates_dir }}"
+  become: true
+  become_user: "{{ n8n_user }}"
+  register: nuclei_update
+  changed_when: "'Successfully' in (nuclei_update.stdout ~ nuclei_update.stderr)"

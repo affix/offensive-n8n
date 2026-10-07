@@ -1,0 +1,9 @@
+---
+- name: Provision Kali Pi as a local-only n8n offensive orchestrator
+  hosts: pi
+  become: true
+  roles:
+    - base
+    - docker
+    - n8n
+    - tooling

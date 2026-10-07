@@ -1,0 +1,4 @@
+# Managed by Ansible. Passwordless sudo for the n8n service user, restricted to
+# the raw-socket scanners that need root. Full paths only.
+Defaults:{{ n8n_user }} !requiretty
+{{ n8n_user }} ALL=(root) NOPASSWD: {{ n8n_sudo_commands | join(', ') }}

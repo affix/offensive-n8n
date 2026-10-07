@@ -1,0 +1,77 @@
+---
+# Bring the host to a known baseline: packages, timezone, zram, firewall,
+# and (gated) SSH hardening.
+
+- name: Update apt cache and full-upgrade the system
+  ansible.builtin.apt:
+    update_cache: true
+    upgrade: full
+    cache_valid_time: 3600
+
+- name: Install baseline packages (firewall, zram, Docker repo prereqs)
+  ansible.builtin.apt:
+    name:
+      - nftables
+      - zram-tools
+      - ca-certificates
+      - curl
+      - gnupg
+    state: present
+
+- name: Set the system timezone
+  community.general.timezone:
+    name: "{{ timezone }}"
+
+# --- zram swap (zstd, ~50% of RAM) -----------------------------------------
+
+- name: Configure zram swap (zstd, 50% of RAM)
+  ansible.builtin.template:
+    src: zramswap.j2
+    dest: /etc/default/zramswap
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart zramswap
+
+- name: Enable and start zramswap
+  ansible.builtin.service:
+    name: zramswap
+    enabled: true
+    state: started
+
+# --- SSH hardening (gated) --------------------------------------------------
+
+- name: Harden sshd (key-only, no root) when enabled
+  ansible.builtin.template:
+    src: sshd_hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/99-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "/usr/sbin/sshd -t -f %s"
+  when: harden_ssh | bool
+  notify: Restart sshd
+
+# --- nftables firewall ------------------------------------------------------
+
+- name: Deploy nftables ruleset (default-deny inbound, LAN-scoped allows)
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "/usr/sbin/nft -c -f %s"
+  notify: Reload nftables
+
+- name: Enable and start nftables
+  ansible.builtin.service:
+    name: nftables
+    enabled: true
+    state: started
+
+# Apply the firewall (and any other base handlers) now, before the docker/n8n
+# roles run. If we leave this to the end of the play, a failure in a later role
+# aborts before handlers flush and the new ruleset never loads.
+- name: Flush handlers so the firewall is live before later roles
+  ansible.builtin.meta: flush_handlers

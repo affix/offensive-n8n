@@ -1,0 +1,24 @@
+# Managed by Ansible.
+[Unit]
+Description=n8n workflow automation (host-native)
+Documentation=https://docs.n8n.io
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ n8n_user }}
+Group={{ n8n_group }}
+WorkingDirectory={{ n8n_dir }}
+EnvironmentFile={{ n8n_env_file }}
+Environment=HOME={{ n8n_dir }}
+# Deliberately no sandboxing (ProtectSystem, NoNewPrivileges, etc.): the
+# Execute Command node must reach host tools, docker, and sudo.
+ExecStart={{ n8n_bin }} start
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

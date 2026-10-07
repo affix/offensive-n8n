@@ -1,0 +1,9 @@
+# Managed by Ansible. Internal HTTP reverse proxy for n8n.
+# Explicit http:// scheme keeps Caddy on port 80 with no automatic HTTPS /
+# redirect (this is a LAN-only, name-based vhost). WebSockets (the editor's
+# push channel) are proxied transparently by reverse_proxy. `bind` keeps the
+# listener on the LAN bind IP only, never 0.0.0.0.
+http://{{ n8n_hostname }}:{{ caddy_http_port }} {
+    bind {{ n8n_bind_ip }}
+    reverse_proxy {{ n8n_bind_ip }}:{{ n8n_port }}
+}

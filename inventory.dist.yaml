@@ -1,0 +1,10 @@
+---
+# Copy to inventory.yaml and set your Pi's address and SSH user.
+# inventory.yaml is gitignored.
+pi:
+  hosts:
+    pi:
+      ansible_host: 192.168.1.10
+      ansible_user: kali
+  vars:
+    ansible_python_interpreter: /usr/bin/python3

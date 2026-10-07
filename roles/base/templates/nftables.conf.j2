@@ -1,0 +1,48 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible. Default-deny inbound, LAN-scoped allows only.
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        iif "lo" accept
+        ct state established,related accept
+        ct state invalid drop
+
+        # ICMP / ICMPv6 (ping, PMTU, neighbour discovery)
+        ip protocol icmp accept
+        ip6 nexthdr icmpv6 accept
+
+        # SSH, the n8n port, and the Caddy HTTP port, from the management LAN only.
+        ip saddr {{ lan_mgmt_cidr }} tcp dport 22 accept
+        ip saddr {{ lan_mgmt_cidr }} tcp dport {{ n8n_port }} accept
+        ip saddr {{ lan_mgmt_cidr }} tcp dport {{ caddy_http_port }} accept
+
+        # Containers reach host-bound services on any port.
+        # n8n already holds the Docker socket, so this crosses no boundary.
+        iifname "docker0" accept
+        iifname "br-*" accept
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        # Container networking. Docker manages its own NAT/publishing, but this
+        # base chain shares the forward hook, so a drop here kills container
+        # traffic regardless of Docker's rules. Allow established return, drop
+        # invalid, and permit the Docker bridges (egress to the uplink and
+        # DNAT'd ingress to published ports). Non-container routing stays denied.
+        ct state established,related accept
+        ct state invalid drop
+        iifname "docker0" accept
+        oifname "docker0" accept
+        iifname "br-*" accept
+        oifname "br-*" accept
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}

@@ -1,0 +1,15 @@
+---
+- name: Restart zramswap
+  ansible.builtin.service:
+    name: zramswap
+    state: restarted
+
+- name: Restart sshd
+  ansible.builtin.service:
+    name: ssh
+    state: restarted
+
+- name: Reload nftables
+  ansible.builtin.service:
+    name: nftables
+    state: reloaded

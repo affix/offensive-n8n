@@ -1,0 +1,120 @@
+---
+# Copy to group_vars/all.yaml and set your values. all.yaml is gitignored.
+# ----------------------------------------------------------------------------
+# All tunables for the n8n-on-Kali-Pi build. Every image reference is pinned to
+# an explicit tag. `latest` is prohibited anywhere in this project.
+# ----------------------------------------------------------------------------
+
+# --- Network / exposure -----------------------------------------------------
+
+# LAN address n8n binds to. Set to the Pi's LAN IP to reach it from other hosts.
+# Use 127.0.0.1 to make n8n reachable on-box only (no LAN exposure at all).
+n8n_bind_ip: "192.168.1.10"
+
+# Host port the n8n editor/webhooks are published on (direct, behind Caddy).
+n8n_port: 5678
+
+# Caddy reverse proxy: the vhost it serves and the host port it publishes.
+# n8n is reached as http://{{ n8n_hostname }} once DNS points this name at the Pi.
+n8n_hostname: "n8n.lan.example.com"
+caddy_http_port: 80
+
+# Public URL n8n advertises for the editor and webhooks. This is the external
+# front door (e.g. a TLS reverse proxy), NOT the on-box Caddy vhost. Webhook
+# URLs and editor links n8n generates use this.
+n8n_public_host: "n8n.example.com"
+n8n_public_url: "https://n8n.example.com"
+
+# The ONLY source range permitted inbound to SSH (22), the n8n port, and the
+# Caddy HTTP port. Everything else is dropped by the default-deny firewall.
+lan_mgmt_cidr: "192.168.1.0/24"
+
+# Timezone applied to the host and exported to the n8n service.
+timezone: "Europe/London"
+
+# --- Paths ------------------------------------------------------------------
+
+# Install path for n8n. Also the service user's home and N8N_USER_FOLDER, so
+# n8n's state (sqlite DB, credentials, encryption key) lives in n8n_data_dir.
+n8n_dir: "/opt/n8n"
+n8n_data_dir: "{{ n8n_dir }}/.n8n"
+
+# Environment file consumed by the systemd unit.
+n8n_env_file: "/etc/n8n/n8n.env"
+
+# Loot / output path. The only tree the Read/Write Files node may touch.
+loot_dir: "/opt/loot"
+
+# --- Service identity -------------------------------------------------------
+
+# n8n runs natively on the host (not in a container) as this system user, so
+# the Execute Command node runs Kali's own tools directly. The user is a member
+# of the docker group (root-equivalent) and may sudo the commands listed below.
+n8n_user: "n8n"
+n8n_group: "n8n"
+
+# Commands the n8n user may run via `sudo -n` without a password (full paths
+# only). Raw-socket scanners need root for SYN scans.
+n8n_sudo_commands:
+  - /usr/bin/nmap
+  - /usr/bin/masscan
+  - /usr/bin/naabu
+
+# n8n 2.x excludes Execute Command, Read/Write Files and Local File Trigger by
+# default. An empty list re-enables them. Host command execution is the whole
+# reason n8n runs on the host, so this stays empty.
+n8n_nodes_exclude: "[]"
+
+# --- Runtime versions (all pinned) ------------------------------------------
+
+# n8n version installed globally with npm.
+n8n_version: "2.42.3"
+
+# Node.js major from NodeSource. n8n 2.x supports 20.19 through 24.x.
+nodejs_major: 22
+
+# Kali-native tool packages installed on the host for the Execute Command node.
+# Keep to packages that exist in kali-rolling for arm64.
+kali_tool_packages:
+  - nmap
+  - masscan
+  - nuclei
+  - subfinder
+  - httpx-toolkit
+  - naabu
+  - katana
+  - dnsx
+  - ffuf
+  - feroxbuster
+  - gobuster
+  - sqlmap
+  - nikto
+  - wpscan
+  - amass
+  - gowitness
+  - whatweb
+  - trufflehog
+  - gitleaks
+  - seclists
+  - jq
+
+# --- Container images (all pinned) ------------------------------------------
+
+# Image used to register cross-arch binfmt handlers (qemu).
+binfmt_image: "tonistiigi/binfmt:qemu-v8.1.5"
+
+# Host path for persisted nuclei templates (refreshed with the host nuclei).
+nuclei_templates_dir: "/opt/nuclei-templates"
+
+# --- Docker apt repo --------------------------------------------------------
+
+# Kali reports its own codename (e.g. "kali-rolling"), which Docker does NOT
+# publish a repo for. Set this to the Debian base Kali currently tracks:
+# bookworm (Debian 12) or trixie (Debian 13).
+docker_apt_codename: "trixie"
+
+# --- SSH hardening ----------------------------------------------------------
+
+# Gate on the SSH lockdown. Keep OFF for the first run so a misconfigured key
+# cannot lock the operator out. Flip to true once key auth is confirmed working.
+harden_ssh: false
