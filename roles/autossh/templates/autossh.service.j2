@@ -1,0 +1,30 @@
+# Managed by Ansible.
+[Unit]
+Description=autossh tunnel to {{ autossh_remote }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ autossh_user }}
+# -M 0 disables autossh's monitor port; ssh's own keepalives detect a dead
+# link and autossh restarts it. GATETIME=0 retries even if the first try fails.
+Environment=AUTOSSH_GATETIME=0
+ExecStart=/usr/bin/autossh -M 0 -N \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes \
+    -o BatchMode=yes \
+    -o IdentitiesOnly=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -i {{ autossh_identity_file }} \
+    -p {{ autossh_remote_port }} \
+{% for fwd in autossh_local_forwards %}
+    -L {{ fwd }} \
+{% endfor %}
+    {{ autossh_remote }}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

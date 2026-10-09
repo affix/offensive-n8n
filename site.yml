@@ -23,3 +23,5 @@
     - docker
     - n8n
     - tooling
+    - role: autossh
+      when: autossh_enabled | default(false)

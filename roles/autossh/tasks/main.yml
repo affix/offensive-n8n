@@ -1,0 +1,37 @@
+---
+# Persistent SSH tunnel held open by autossh under systemd. Runs as
+# autossh_user so it uses that user's existing key and known_hosts.
+
+- name: Install autossh
+  ansible.builtin.apt:
+    name: autossh
+    state: present
+
+- name: Check the tunnel identity file exists
+  ansible.builtin.stat:
+    path: "{{ autossh_identity_file }}"
+  register: autossh_key
+
+- name: Fail when the tunnel identity file is missing
+  ansible.builtin.assert:
+    that: autossh_key.stat.exists
+    fail_msg: "{{ autossh_identity_file }} not found on {{ inventory_hostname }}."
+    quiet: true
+
+- name: Template the autossh systemd unit
+  ansible.builtin.template:
+    src: autossh.service.j2
+    dest: "/etc/systemd/system/{{ autossh_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart autossh
+
+- name: Enable and start the autossh tunnel
+  ansible.builtin.systemd:
+    name: "{{ autossh_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true

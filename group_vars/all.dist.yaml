@@ -147,3 +147,23 @@ docker_apt_codename: "trixie"
 # Gate on the SSH lockdown. Keep OFF for the first run so a misconfigured key
 # cannot lock the operator out. Flip to true once key auth is confirmed working.
 harden_ssh: false
+
+# --- autossh tunnel ---------------------------------------------------------
+
+# Persistent SSH tunnel held open by autossh as a systemd service. Off by default.
+autossh_enabled: false
+autossh_service_name: "autossh-tunnel"
+
+# Local account the tunnel runs as. Its key and known_hosts are used as-is.
+autossh_user: "kali"
+autossh_identity_file: "/home/kali/.ssh/id_ed25519"
+
+# SSH destination (user@host) and port.
+autossh_remote: "user@remote.example.com"
+autossh_remote_port: 22
+
+# ssh -L specs: [bind_address:]port:host:hostport. host is resolved on the
+# remote end. Bind to n8n_bind_ip (and list the port in lan_extra_tcp_ports)
+# to reach the forward from the management LAN; 127.0.0.1 keeps it on-box.
+autossh_local_forwards:
+  - "127.0.0.1:9200:127.0.0.1:9200"

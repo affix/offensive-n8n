@@ -66,6 +66,10 @@ All tunables live in `group_vars/all.yaml`. Defaults and comments are in `group_
 | `binfmt_image` | Pinned image that registers qemu handlers. |
 | `docker_apt_codename` | Debian codename for Docker's repo. Kali's own codename is not published by Docker. |
 | `harden_ssh` | Gate for key-only, no-root SSH. Leave off until key auth is confirmed. |
+| `autossh_enabled`, `autossh_service_name` | Gate and systemd unit name for a persistent autossh tunnel. Off by default. |
+| `autossh_user`, `autossh_identity_file` | Local account the tunnel runs as and the key it uses. The key must already exist on the host. |
+| `autossh_remote`, `autossh_remote_port` | SSH destination (`user@host`) and port. |
+| `autossh_local_forwards` | `ssh -L` specs held open by the tunnel. |
 
 No image anywhere in the project uses the `latest` tag.
 
