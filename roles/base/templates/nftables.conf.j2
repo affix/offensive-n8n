@@ -19,6 +19,11 @@ table inet filter {
         ip saddr {{ lan_mgmt_cidr }} tcp dport 22 accept
         ip saddr {{ lan_mgmt_cidr }} tcp dport {{ n8n_port }} accept
         ip saddr {{ lan_mgmt_cidr }} tcp dport {{ caddy_http_port }} accept
+{% if lan_extra_tcp_ports | length > 0 %}
+
+        # Extra TCP ports, from the management LAN only.
+        ip saddr {{ lan_mgmt_cidr }} tcp dport { {{ lan_extra_tcp_ports | join(', ') }} } accept
+{% endif %}
 {% if n8n_proxy_cidrs | length > 0 %}
 
         # Remote reverse proxy sources, n8n port only.

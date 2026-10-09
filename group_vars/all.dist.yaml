@@ -41,6 +41,10 @@ lan_mgmt_cidr: "192.168.1.0/24"
 # narrowest CIDR possible. Empty list adds no rule.
 n8n_proxy_cidrs: []
 
+# Extra TCP ports opened to lan_mgmt_cidr only (e.g. a service on the host that
+# is not managed here). Empty list adds no rule.
+lan_extra_tcp_ports: []
+
 # Timezone applied to the host and exported to the n8n service.
 timezone: "Europe/London"
 
