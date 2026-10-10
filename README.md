@@ -98,6 +98,19 @@ Containers still work because the user is in the `docker` group:
 docker run --rm -v /opt/loot:/loot projectdiscovery/katana:v1.8.0 -u https://example.com -o /loot/katana.txt
 ```
 
+## Workflows
+
+`workflows/` holds ready-to-import n8n workflows built for this host, grouped as they are in n8n. Each folder has a README covering what every workflow does, the data tables and Postgres tables to create, and the import order.
+
+| Folder | What it does |
+|---|---|
+| [`asm-pipeline`](workflows/asm-pipeline/README.md) | External attack surface pipeline: scoped discovery, takeover checks, port scans, web fingerprinting, diffing, vuln checks, Ollama triage and Discord alerts, plus CVE Watch, housekeeping and scope expiry. |
+| [`wazuh-triage`](workflows/wazuh-triage/README.md) | Polls the Wazuh indexer, dedupes and suppresses high-severity alerts, enriches source IPs, LLM-triages the rest and pages only on escalations. Also analyses web honeypot payloads. |
+| [`subdomain-takeover`](workflows/subdomain-takeover/README.md) | Scheduled and one-off subdomain takeover monitoring for a list of root domains. |
+| [`threat-intel`](workflows/threat-intel/README.md) | IP reputation from AbuseIPDB, VirusTotal, GreyNoise and OTX, as a sub-workflow and an IP or domain report form. |
+
+The exports are sanitised. After importing, replace the placeholders (`OLLAMA_HOST`, `OLLAMA_MODEL`, `WAZUH_INDEXER`, `DISCORD_*`, `DATA_TABLE_*`, `CREDENTIAL_ID`) as described in each folder's README. Workflow IDs are kept so sub-workflow calls resolve, which also means importing into an instance that already has them overwrites the existing copies. The Wazuh workflows need the `postgres` role enabled.
+
 ## Backups
 
 `/opt/n8n/.n8n` holds the SQLite database, every credential, and the encryption key that decrypts them. It is the only thing that needs backing up. Keep the backup encrypted and off the box. Restoring that directory onto a fresh install brings back all workflows and credentials.
