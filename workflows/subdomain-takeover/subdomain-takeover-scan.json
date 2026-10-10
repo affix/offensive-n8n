@@ -1,0 +1,458 @@
+{
+  "id": "79n2VgZ4rNWAJoqW",
+  "name": "Subdomain Takeover Scan",
+  "description": "Sub-workflow: scans a lane of root domains one after another for subdomain takeovers, records new findings and alerts Discord. Started by Subdomain Takeover Monitor, max 3 lanes.",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "domains",
+              "type": "array"
+            }
+          ]
+        }
+      },
+      "id": "2501683a-e231-47b1-8977-a90f35f97020",
+      "name": "Scan Request",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Takes a lane of { domain, client } entries and emits one item per valid domain.\n// The scan node runs items one after another, so each lane scans its domains sequentially.\n// Re-checked here because any caller can hand this workflow domains, and they reach a shell command.\nconst hostname = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/;\nconst lane = $input.first().json.domains;\nconst seen = new Set();\nconst out = [];\nfor (const entry of Array.isArray(lane) ? lane : []) {\n  const domain = String(entry?.domain ?? '').trim().toLowerCase();\n  if (!hostname.test(domain) || seen.has(domain)) continue;\n  seen.add(domain);\n  out.push({ json: { domain, client: String(entry?.client ?? '').trim() || null } });\n}\nreturn out;"
+      },
+      "id": "e078fc7a-9cbc-4b63-8ea2-4852c7fe1e82",
+      "name": "Validate Lane",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "executeOnce": false,
+        "command": "=D='{{ $json.domain }}'\ncase \"$D\" in ''|*[!a-z0-9.-]*) echo '{\"error\":\"invalid domain\"}'; exit 1;; esac\nOUT=\"/opt/loot/takeover/$D/$(date -u +%Y%m%dT%H%M%SZ)\"\nmkdir -p \"$OUT\"\nsubfinder -d \"$D\" -silent -o \"$OUT/subdomains.txt\" >/dev/null 2>\"$OUT/subfinder.log\"\ntouch \"$OUT/subdomains.txt\"\ndnsx -l \"$OUT/subdomains.txt\" -silent -cname -resp -json -o \"$OUT/cnames.jsonl\" >/dev/null 2>\"$OUT/dnsx.log\"\ntouch \"$OUT/cnames.jsonl\"\njq -r 'select(.cname) | .host' \"$OUT/cnames.jsonl\" | sort -u > \"$OUT/cname-hosts.txt\"\ntouch \"$OUT/nuclei.jsonl\"\nif [ -s \"$OUT/cname-hosts.txt\" ]; then nuclei -l \"$OUT/cname-hosts.txt\" -tags takeover -jsonl -silent -nc -duc -rl 25 -o \"$OUT/nuclei.jsonl\" >/dev/null 2>\"$OUT/nuclei.log\"; fi\njq -nc --arg d \"$D\" --arg out \"$OUT\" --argjson subs \"$(wc -l < \"$OUT/subdomains.txt\")\" --slurpfile c \"$OUT/cnames.jsonl\" --slurpfile f \"$OUT/nuclei.jsonl\" '{domain: $d, output: $out, subdomains: $subs, cname_hosts: ($c | length), cnames: ($c | map({key: .host, value: (.cname | join(\",\"))}) | from_entries), findings: ($f | map({host: .host, matched: .\"matched-at\", template: .\"template-id\", name: .info.name, severity: .info.severity}))}'"
+      },
+      "id": "227fedb4-3e30-4cef-9554-a7d1a23185c2",
+      "name": "Enumerate and Check Takeovers",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        448,
+        96
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item per confirmed takeover finding. No findings means no items, so nothing downstream runs.\n// Failed scans are skipped here and reported by Find Failed Scans, so one bad domain doesn't block the lane.\n// The scan node only returns command output, so the client is looked up by root domain.\nconst clients = new Map($('Validate Lane').all().map(i => [i.json.domain, i.json.client ?? null]));\nconst now = new Date().toISOString();\nconst seen = new Set();\nconst out = [];\nfor (const item of $input.all()) {\n  if (item.json.error) continue;\n  let run;\n  try {\n    run = JSON.parse(item.json.stdout);\n  } catch (e) {\n    continue;\n  }\n  if (run.error) continue;\n  for (const f of run.findings ?? []) {\n    const host = String(f.host ?? '').replace(/^[a-z]+:\\/\\//i, '').split(/[/:]/)[0].toLowerCase();\n    const key = `${host}|${f.template}`;\n    if (!host || seen.has(key)) continue;\n    seen.add(key);\n    out.push({ json: {\n      finding_key: key,\n      domain: run.domain,\n      host,\n      cname: run.cnames?.[host] ?? '',\n      template_id: f.template ?? '',\n      name: f.name ?? '',\n      severity: f.severity ?? '',\n      matched_at: f.matched ?? '',\n      evidence_dir: run.output,\n      status: 'new',\n      first_seen: now,\n      client: clients.get(run.domain) ?? null\n    } });\n  }\n}\nreturn out;"
+      },
+      "id": "f194cc2f-22f6-48a3-b5e7-942cda04f19b",
+      "name": "Parse Findings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "rowNotExists",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_takeover_findings",
+          "cachedResultName": "takeover_findings"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "finding_key",
+              "keyValue": "={{ $json.finding_key }}"
+            }
+          ]
+        }
+      },
+      "id": "4e41162d-5534-416b-aced-bbb56057da9c",
+      "name": "Only New Findings",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        896,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_takeover_findings",
+          "cachedResultName": "takeover_findings"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "finding_key",
+              "displayName": "finding_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "domain",
+              "displayName": "domain",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "host",
+              "displayName": "host",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "cname",
+              "displayName": "cname",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "template_id",
+              "displayName": "template_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "name",
+              "displayName": "name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "severity",
+              "displayName": "severity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "matched_at",
+              "displayName": "matched_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "evidence_dir",
+              "displayName": "evidence_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "first_seen",
+              "displayName": "first_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "client",
+              "displayName": "client",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "d8684c6b-659e-4555-abb2-28995c0e5a4d",
+      "name": "Record Finding",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1120,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One Discord embed per host. Groups every new detection for the host, colours by worst severity,\n// separates confirmed service fingerprints from plain dangling CNAMEs, and tags the client.\nconst RANK = { critical: 4, high: 3, medium: 2, low: 1, info: 0, unknown: -1 };\nconst COLOUR = { critical: 0x9B111E, high: 0xE74C3C, medium: 0xF39C12, low: 0x3498DB, info: 0x95A5A6, unknown: 0x7F8C8D };\nconst cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };\nconst code = s => '`' + String(s).replace(/`/g, \"'\") + '`';\nconst title = s => s.charAt(0).toUpperCase() + s.slice(1);\n\nconst hosts = new Map();\nfor (const { json: f } of $input.all()) {\n  if (!hosts.has(f.host)) hosts.set(f.host, { ...f, detections: [] });\n  const h = hosts.get(f.host);\n  h.detections.push({ id: f.template_id, name: f.name, severity: String(f.severity || 'unknown').toLowerCase(), matched: f.matched_at });\n}\n\nreturn [...hosts.values()].map(h => {\n  const worst = h.detections.reduce((w, d) => (RANK[d.severity] ?? -1) > (RANK[w] ?? -1) ? d.severity : w, 'unknown');\n  const danglingOnly = h.detections.every(d => /dangling|servfail/i.test(d.id));\n  const client = String(h.client ?? '').trim();\n  const cname = h.cname || 'none recorded';\n  const tag = client ? `[${client}] ` : '';\n  const headline = tag + (danglingOnly ? `⚠️ Dangling CNAME · ${h.host}` : `🎯 Possible takeover · ${h.host}`);\n  const description = danglingOnly\n    ? `${code(h.host)} points at ${code(cname)}, which no longer resolves. Check whether that target name can be registered by anyone.`\n    : `nuclei matched a takeover fingerprint on ${code(h.host)}. The service behind ${code(cname)} may let someone claim this hostname.`;\n  const detections = h.detections\n    .map(d => `• **${cut(d.name || d.id, 80)}** · ${title(d.severity)}\\n  ${code(d.id)}`)\n    .join('\\n');\n  const matched = [...new Set(h.detections.map(d => d.matched).filter(Boolean))].map(code).join('\\n');\n  return { json: {\n    host: h.host,\n    client: client || null,\n    embed: {\n      title: cut(headline, 256),\n      url: `https://${h.host}`,\n      description: cut(description, 1000),\n      color: COLOUR[worst] ?? COLOUR.unknown,\n      fields: [\n        { name: 'Severity', value: title(worst), inline: true },\n        { name: 'Root domain', value: code(h.domain), inline: true },\n        { name: 'Client', value: cut(client || 'None', 1024), inline: true },\n        { name: 'CNAME target', value: cut('```\\n' + cname + '\\n```', 1024) },\n        { name: 'What matched', value: cut(detections, 1024) },\n        { name: 'Matched at', value: cut(matched || code(h.host), 1024) },\n        { name: 'Evidence', value: cut(code(h.evidence_dir), 1024) }\n      ],\n      footer: { text: `Offensive N8N · Subdomain Takeover Monitor · ${h.detections.length} detection${h.detections.length === 1 ? '' : 's'}` },\n      timestamp: h.first_seen\n    }\n  } };\n});"
+      },
+      "id": "89268fe6-2cce-4a45-bda5-07395c56a2ad",
+      "name": "Format Alerts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts",
+          "cachedResultUrl": "https://discord.com/channels/DISCORD_GUILD_ID"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts",
+          "cachedResultUrl": "https://discord.com/channels/DISCORD_GUILD_ID/DISCORD_ALERTS_CHANNEL_ID"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "id": "7cb9cd70-b716-4e80-80d4-3818674b6f30",
+      "name": "Discord Alerts",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        -32
+      ],
+      "webhookId": "431b4559-00ef-4562-872f-89bba622724a",
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// One Discord embed per domain whose scan errored or returned unusable output.\n// The scan node emits one item per lane entry, so the index maps back to the domain.\nconst lane = $('Validate Lane').all();\nconst cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };\nconst out = [];\n$input.all().forEach((item, i) => {\n  const { domain = 'unknown', client = null } = lane[i]?.json ?? {};\n  let reason = null;\n  if (item.json.error) {\n    const e = item.json.error;\n    reason = typeof e === 'string' ? e : (e.message ?? JSON.stringify(e));\n  } else {\n    try {\n      const run = JSON.parse(item.json.stdout);\n      if (run.error) reason = `Scan refused: ${run.error}`;\n    } catch (e) {\n      reason = `Output was not JSON (exit ${item.json.exitCode}): ${item.json.stderr || item.json.stdout || 'no output'}`;\n    }\n  }\n  if (!reason) return;\n  const tag = client ? `[${client}] ` : '';\n  out.push({ json: {\n    domain,\n    client,\n    reason,\n    embed: {\n      title: cut(`${tag}❌ Scan failed · ${domain}`, 256),\n      description: 'The takeover scan for this domain did not complete, so it was skipped this run. Other domains in the lane were still processed.',\n      color: 0x7F8C8D,\n      fields: [\n        { name: 'Client', value: cut(client || 'None', 1024), inline: true },\n        { name: 'Error', value: cut('```\\n' + reason + '\\n```', 1024) },\n        { name: 'Logs', value: cut('`/opt/loot/takeover/' + domain + '/<latest>/*.log`', 1024) }\n      ],\n      footer: { text: 'Offensive N8N · Subdomain Takeover Monitor' },\n      timestamp: new Date().toISOString()\n    }\n  } });\n});\nreturn out;"
+      },
+      "id": "863a8f0c-d011-4be7-9daa-feaf0ffb941d",
+      "name": "Find Failed Scans",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts",
+          "cachedResultUrl": "https://discord.com/channels/DISCORD_GUILD_ID"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts",
+          "cachedResultUrl": "https://discord.com/channels/DISCORD_GUILD_ID/DISCORD_ALERTS_CHANNEL_ID"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "id": "e7b1130c-3110-4d3a-9ffc-06b90872f212",
+      "name": "Discord Scan Failures",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        896,
+        320
+      ],
+      "webhookId": "66f237da-bf8e-4782-b294-0318e7cf6e16",
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Scan Request": {
+      "main": [
+        [
+          {
+            "node": "Validate Lane",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enumerate and Check Takeovers": {
+      "main": [
+        [
+          {
+            "node": "Parse Findings",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Find Failed Scans",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Findings": {
+      "main": [
+        [
+          {
+            "node": "Only New Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only New Findings": {
+      "main": [
+        [
+          {
+            "node": "Record Finding",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Format Alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Alerts": {
+      "main": [
+        [
+          {
+            "node": "Discord Alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Lane": {
+      "main": [
+        [
+          {
+            "node": "Enumerate and Check Takeovers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Failed Scans": {
+      "main": [
+        [
+          {
+            "node": "Discord Scan Failures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

@@ -1,0 +1,199 @@
+{
+  "id": "QptyXc2oFNL8f8gX",
+  "name": "ASM · Job Runner",
+  "description": "Runs one ASM stage script detached on the host (setsid + timeout), polls for completion, returns result.json. Called by every stage module.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "f0cfbcbd-c684-4931-b415-4eeb478e8fad",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "job_dir",
+              "type": "string"
+            },
+            {
+              "name": "script",
+              "type": "string"
+            },
+            {
+              "name": "max_minutes",
+              "type": "number"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "1ca81452-f6bc-4898-a69b-60c5c89fe840",
+      "name": "Validate Job",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const j = $input.first().json;\nconst DIR_RE = /^\\/opt\\/loot\\/asm\\/(_sys|[a-z0-9][a-z0-9_-]{0,39})\\/\\d{8}T\\d{6}Z-[0-9a-f]{4}\\/[a-z_]{2,20}$/;\nif (!DIR_RE.test(String(j.job_dir ?? ''))) throw new Error(`Refusing job_dir: ${j.job_dir}`);\nif (!j.script || typeof j.script !== 'string') throw new Error('No script supplied');\nconst max = Math.min(Math.max(parseInt(j.max_minutes ?? 120, 10) || 120, 1), 600);\nconst script_b64 = Buffer.from(j.script, 'utf8').toString('base64');\nif (script_b64.length > 100000) throw new Error(`Script too large for command line (${script_b64.length} bytes)`);\nreturn [{ json: { job_dir: j.job_dir, stage: j.job_dir.split('/').pop(), max_minutes: max, script_b64 } }];\n"
+      }
+    },
+    {
+      "id": "6b7e90e8-651c-4bcc-9da0-226e16b25abe",
+      "name": "Launch Job",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "executeOnce": true,
+        "command": "=D='{{ $json.job_dir }}'\ncase \"$D\" in /opt/loot/asm/*/*/*) ;; *) echo 'bad job dir' >&2; exit 1;; esac\nmkdir -p \"$D\" && cd \"$D\" || exit 1\nrm -f .done result.json\nprintf '%s' '{{ $json.script_b64 }}' | base64 -d > job.sh\nsetsid nohup bash -c 'timeout {{ $json.max_minutes }}m bash job.sh > job.log 2>&1; echo $? > .done' > /dev/null 2>&1 < /dev/null &\necho '{\"launched\":true}'"
+      }
+    },
+    {
+      "id": "aa1e61a8-119b-4523-a6c8-c3dc32e38d91",
+      "name": "Poll Job",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "executeOnce": true,
+        "command": "=cd '{{ $('Validate Job').first().json.job_dir }}' || exit 1\nfor i in $(seq 1 22); do [ -f .done ] && break; sleep 5; done\nif [ ! -f .done ]; then echo '{\"done\":false}'; exit 0; fi\nrc=$(tr -dc 0-9 < .done); [ -n \"$rc\" ] || rc=1\nif jq -e . result.json >/dev/null 2>&1; then res=$(jq -c . result.json); else res=null; fi\njq -nc --argjson rc \"$rc\" --argjson r \"$res\" --arg tail \"$(tail -c 1500 job.log 2>/dev/null)\" '{done: true, rc: $rc, result: $r, log_tail: $tail}'"
+      }
+    },
+    {
+      "id": "2def375b-d23e-486a-8e2e-3bc02f30d090",
+      "name": "Job Finished?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ JSON.parse($json.stdout).done }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "fbf1d46f-0814-41ea-a25d-44ba7a2114b6",
+      "name": "Job Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        220
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const job = $('Validate Job').first().json;\nconst r = JSON.parse($input.first().json.stdout);\nconst timedOut = r.rc === 124;\nif (r.rc !== 0 && !timedOut) {\n  const tail = String(r.log_tail ?? '').replace(/\\s+/g, ' ').trim().slice(-800);\n  throw new Error(`Stage ${job.stage} failed (rc=${r.rc}). Log tail: ${tail}`);\n}\nreturn [{ json: { stage: job.stage, job_dir: job.job_dir, rc: r.rc, timed_out: timedOut, result: r.result ?? {} } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Validate Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Job": {
+      "main": [
+        [
+          {
+            "node": "Launch Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Launch Job": {
+      "main": [
+        [
+          {
+            "node": "Poll Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Job": {
+      "main": [
+        [
+          {
+            "node": "Job Finished?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Job Finished?": {
+      "main": [
+        [
+          {
+            "node": "Job Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Poll Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

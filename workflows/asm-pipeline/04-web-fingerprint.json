@@ -1,0 +1,158 @@
+{
+  "id": "Fi24CkQg4NDtljrM",
+  "name": "ASM · 04 Web Fingerprint",
+  "description": "Stage 4: httpx (Docker, pinned) over hostnames, ip:port and host:port combos; fingerprint = hash of status, title, tech, server, favicon, TLS CN.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "df1e356a-ec21-44f8-af5d-411303f8038c",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "3a7fdd2b-9fe0-4c5a-bfe6-fbf6cb4c723f",
+      "name": "Build Web Fingerprint Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STAGE = 'web';\nconst MAX_MINUTES = 90;\nconst BODY = \"D=\\\"$R/discovery\\\"\\n\\npython3 - \\\"$D/hosts.txt\\\" \\\"$D/host_ip.json\\\" \\\"$R/ports/open.txt\\\" \\\"$R/scope/urls.txt\\\" > targets.txt <<'PY'\\nimport json, sys\\nfrom pathlib import Path\\nhosts_f, map_f, open_f, urls_f = sys.argv[1:5]\\nread = lambda p: [l.strip() for l in Path(p).read_text().splitlines() if l.strip()] if Path(p).exists() else []\\nhosts = read(hosts_f)\\nhost_ip = json.loads(Path(map_f).read_text()) if Path(map_f).exists() else {}\\nby_ip = {}\\nfor h, ips in host_ip.items():\\n    for i in ips:\\n        by_ip.setdefault(i, []).append(h)\\nt = set(hosts)\\nfor line in read(open_f):\\n    ip, _, port = line.rpartition(\\\":\\\")\\n    t.add(f\\\"{ip}:{port}\\\")\\n    if port not in (\\\"80\\\", \\\"443\\\"):\\n        for h in sorted(by_ip.get(ip, []))[:25]:\\n            t.add(f\\\"{h}:{port}\\\")\\nt.update(read(urls_f))\\nprint(\\\"\\\\n\\\".join(sorted(t)))\\nPY\\n\\n: > httpx.jsonl\\nif [ -s targets.txt ]; then\\n  timeout 60m docker run --rm -i --user \\\"$(id -u):$(id -g)\\\" -e HOME=/tmp -v \\\"$S:/w\\\" -w /w \\\\\\n    projectdiscovery/httpx:v1.12.0 -l /w/targets.txt -json -o /w/httpx.jsonl -silent -nc -duc \\\\\\n    -sc -title -td -server -favicon -tls-grab -cdn -ip -rl \\\"$RATE\\\" -t 25 -timeout 10 -retries 1 >/dev/null 2>httpx.log || true\\n  touch httpx.jsonl\\nfi\\n\\npython3 - <<'PY'\\nimport hashlib, json\\nseen, out = set(), []\\nfor line in open(\\\"httpx.jsonl\\\"):\\n    try:\\n        r = json.loads(line)\\n    except ValueError:\\n        continue\\n    if r.get(\\\"failed\\\"):\\n        continue\\n    url = r.get(\\\"url\\\", \\\"\\\")\\n    if not url or url in seen:\\n        continue\\n    seen.add(url)\\n    tls = r.get(\\\"tls\\\") or {}\\n    tech = sorted(r.get(\\\"tech\\\") or [])\\n    rec = {\\\"url\\\": url, \\\"host\\\": (r.get(\\\"host\\\") or \\\"\\\").lower(), \\\"ip\\\": r.get(\\\"host_ip\\\") or (r.get(\\\"a\\\") or [\\\"\\\"])[0],\\n           \\\"port\\\": int(r.get(\\\"port\\\") or 0), \\\"scheme\\\": r.get(\\\"scheme\\\", \\\"\\\"), \\\"status_code\\\": r.get(\\\"status_code\\\", 0),\\n           \\\"title\\\": (r.get(\\\"title\\\") or \\\"\\\")[:200], \\\"tech\\\": tech, \\\"server\\\": r.get(\\\"webserver\\\", \\\"\\\"),\\n           \\\"favicon\\\": str(r.get(\\\"favicon\\\", \\\"\\\") or \\\"\\\"), \\\"tls_cn\\\": tls.get(\\\"subject_cn\\\", \\\"\\\"),\\n           \\\"cdn\\\": r.get(\\\"cdn_name\\\", \\\"\\\") if r.get(\\\"cdn\\\") else \\\"\\\"}\\n    basis = [rec[\\\"status_code\\\"], rec[\\\"title\\\"], tech, rec[\\\"server\\\"], rec[\\\"favicon\\\"], rec[\\\"tls_cn\\\"]]\\n    rec[\\\"fingerprint\\\"] = hashlib.sha1(json.dumps(basis).encode()).hexdigest()[:16]\\n    out.append(rec)\\nwith open(\\\"web.jsonl\\\", \\\"w\\\") as fh:\\n    for o in out:\\n        fh.write(json.dumps(o) + \\\"\\\\n\\\")\\nwith open(\\\"result.json\\\", \\\"w\\\") as fh:\\n    json.dump({\\\"web_targets\\\": sum(1 for _ in open(\\\"targets.txt\\\")), \\\"web_live\\\": len(out)}, fh)\\nPY\\n\";\nconst c = $input.first().json;\nconst SAFE = /^[A-Za-z0-9_.\\/:-]+$/;\nconst q = (k) => {\n  const v = String(c[k] ?? '');\n  if (!SAFE.test(v)) throw new Error(`Unsafe or missing context value for ${k}: ${v}`);\n  return `'${v}'`;\n};\nconst int = (v, lo, hi, d) => Math.min(Math.max(parseInt(v ?? d, 10) || d, lo), hi);\nconst header = [\n  '#!/usr/bin/env bash',\n  'set -uo pipefail',\n  `R=${q('run_dir')}`,\n  `S=${q('run_dir').slice(0, -1)}/${STAGE}'`,\n  `ENG=${q('engagement')}`,\n  `RUN_ID=${q('run_id')}`,\n  `STATE=${q('state_dir')}`,\n  `RATE=${int(c.rate, 1, 500, 50)}`,\n  `PORT_RATE=${int(c.port_rate, 50, 2000, 500)}`,\n  `INTRUSIVE=${c.intrusive === true ? 1 : 0}`,\n  `PERMUTE=${c.permute === true ? 1 : 0}`,\n  'mkdir -p \"$S\" && cd \"$S\" || exit 1',\n  ''\n].join('\\n');\nreturn [{ json: { job_dir: `${c.run_dir}/${STAGE}`, script: header + BODY, max_minutes: MAX_MINUTES } }];\n"
+      }
+    },
+    {
+      "id": "e76c4c66-439a-4b10-9e49-b5e90603363c",
+      "name": "Run Web Fingerprint",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "QptyXc2oFNL8f8gX",
+          "cachedResultName": "ASM · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "80e6539e-5ecd-4661-8c38-5f7b3320bfa9",
+      "name": "Return Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst r = $input.first().json;\nconst stages = { ...(ctx.stages ?? {}), web: { ...(r.result ?? {}), rc: r.rc, timed_out: r.timed_out } };\nreturn [{ json: { ...ctx, stages } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Build Web Fingerprint Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Web Fingerprint Script": {
+      "main": [
+        [
+          {
+            "node": "Run Web Fingerprint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Web Fingerprint": {
+      "main": [
+        [
+          {
+            "node": "Return Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

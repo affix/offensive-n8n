@@ -1,0 +1,710 @@
+{
+  "id": "uGoTm9hPm0iJzU2G",
+  "name": "ASM · 05 Diff",
+  "description": "Stage 5: diffs open ports and web fingerprints against on-disk state, writes delta target lists for Vuln, upserts new/changed assets into asm_assets.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "31539d09-baf2-4c46-9ce3-d919ad337516",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "722b816a-1f2d-4c07-9be6-412766f9c466",
+      "name": "Build Diff Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STAGE = 'diff';\nconst MAX_MINUTES = 30;\nconst BODY = \"mkdir -p \\\"$STATE\\\"\\npython3 - \\\"$R\\\" \\\"$STATE\\\" \\\"$ENG\\\" \\\"$RUN_ID\\\" <<'PY'\\nimport json, os, sys\\nfrom pathlib import Path\\nR, ST, eng, run_id = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4]\\n\\ndef jl(p):\\n    p = Path(p)\\n    if not p.exists():\\n        return []\\n    out = []\\n    for line in p.read_text().splitlines():\\n        try:\\n            out.append(json.loads(line))\\n        except ValueError:\\n            pass\\n    return out\\n\\ndef atomic(p, text):\\n    tmp = p.with_suffix(p.suffix + \\\".tmp\\\")\\n    tmp.write_text(text)\\n    os.replace(tmp, p)\\n\\nknown_ports = set((ST / \\\"ports.txt\\\").read_text().split()) if (ST / \\\"ports.txt\\\").exists() else set()\\nknown_web = json.loads((ST / \\\"web.json\\\").read_text()) if (ST / \\\"web.json\\\").exists() else {}\\nbaseline = not known_ports and not known_web\\nopen_ports = set((R / \\\"ports/open.txt\\\").read_text().split()) if (R / \\\"ports/open.txt\\\").exists() else set()\\nservices = {f\\\"{s['ip']}:{s['port']}\\\": s for s in jl(R / \\\"ports/services.jsonl\\\")}\\nweb = jl(R / \\\"web/web.jsonl\\\")\\nweb_ipports = {f\\\"{w['ip']}:{w['port']}\\\" for w in web}\\n\\ndelta = []\\nfor ipport in sorted(open_ports - known_ports):\\n    ip, _, port = ipport.rpartition(\\\":\\\")\\n    s = services.get(ipport, {})\\n    svc = \\\" \\\".join(x for x in [s.get(\\\"service\\\", \\\"\\\"), s.get(\\\"product\\\", \\\"\\\"), s.get(\\\"version\\\", \\\"\\\")] if x)\\n    delta.append({\\\"kind\\\": \\\"port\\\", \\\"change\\\": \\\"new\\\", \\\"asset_key\\\": f\\\"{eng}|port|{ipport}\\\", \\\"host\\\": \\\"\\\", \\\"ip\\\": ip,\\n                  \\\"port\\\": int(port), \\\"service\\\": svc, \\\"url\\\": \\\"\\\", \\\"status_code\\\": 0, \\\"title\\\": \\\"\\\", \\\"tech\\\": \\\"\\\",\\n                  \\\"fingerprint\\\": \\\"\\\", \\\"is_web\\\": ipport in web_ipports})\\nfor w in web:\\n    prev = known_web.get(w[\\\"url\\\"])\\n    if prev == w[\\\"fingerprint\\\"]:\\n        continue\\n    delta.append({\\\"kind\\\": \\\"web\\\", \\\"change\\\": \\\"new\\\" if prev is None else \\\"changed\\\", \\\"asset_key\\\": f\\\"{eng}|web|{w['url']}\\\",\\n                  \\\"host\\\": w[\\\"host\\\"], \\\"ip\\\": w[\\\"ip\\\"], \\\"port\\\": w[\\\"port\\\"], \\\"service\\\": w.get(\\\"server\\\", \\\"\\\"), \\\"url\\\": w[\\\"url\\\"],\\n                  \\\"status_code\\\": w[\\\"status_code\\\"], \\\"title\\\": w[\\\"title\\\"], \\\"tech\\\": \\\", \\\".join(w[\\\"tech\\\"])[:300],\\n                  \\\"fingerprint\\\": w[\\\"fingerprint\\\"], \\\"is_web\\\": True})\\n\\nwith open(\\\"delta.jsonl\\\", \\\"w\\\") as fh:\\n    for d in delta:\\n        fh.write(json.dumps(d) + \\\"\\\\n\\\")\\nweb_urls = sorted({d[\\\"url\\\"] for d in delta if d[\\\"kind\\\"] == \\\"web\\\"})\\nnet = sorted({f\\\"{d['ip']}:{d['port']}\\\" for d in delta if d[\\\"kind\\\"] == \\\"port\\\" and not d[\\\"is_web\\\"]})\\nPath(\\\"delta_web.txt\\\").write_text(\\\"\\\".join(f\\\"{u}\\\\n\\\" for u in web_urls))\\nPath(\\\"delta_net.txt\\\").write_text(\\\"\\\".join(f\\\"{n}\\\\n\\\" for n in net))\\n\\nknown_web.update({w[\\\"url\\\"]: w[\\\"fingerprint\\\"] for w in web})\\natomic(ST / \\\"web.json\\\", json.dumps(known_web))\\natomic(ST / \\\"ports.txt\\\", \\\"\\\".join(f\\\"{p}\\\\n\\\" for p in sorted(known_ports | open_ports)))\\n\\nsummary = {\\\"baseline\\\": baseline, \\\"ports_open\\\": len(open_ports), \\\"web_live\\\": len(web),\\n           \\\"assets_new\\\": sum(1 for d in delta if d[\\\"change\\\"] == \\\"new\\\"),\\n           \\\"assets_changed\\\": sum(1 for d in delta if d[\\\"change\\\"] == \\\"changed\\\"),\\n           \\\"delta_web\\\": len(web_urls), \\\"delta_net\\\": len(net), \\\"delta_total\\\": len(delta)}\\nPath(\\\"result.json\\\").write_text(json.dumps(summary))\\nPY\\n\";\nconst c = $input.first().json;\nconst SAFE = /^[A-Za-z0-9_.\\/:-]+$/;\nconst q = (k) => {\n  const v = String(c[k] ?? '');\n  if (!SAFE.test(v)) throw new Error(`Unsafe or missing context value for ${k}: ${v}`);\n  return `'${v}'`;\n};\nconst int = (v, lo, hi, d) => Math.min(Math.max(parseInt(v ?? d, 10) || d, lo), hi);\nconst header = [\n  '#!/usr/bin/env bash',\n  'set -uo pipefail',\n  `R=${q('run_dir')}`,\n  `S=${q('run_dir').slice(0, -1)}/${STAGE}'`,\n  `ENG=${q('engagement')}`,\n  `RUN_ID=${q('run_id')}`,\n  `STATE=${q('state_dir')}`,\n  `RATE=${int(c.rate, 1, 500, 50)}`,\n  `PORT_RATE=${int(c.port_rate, 50, 2000, 500)}`,\n  `INTRUSIVE=${c.intrusive === true ? 1 : 0}`,\n  `PERMUTE=${c.permute === true ? 1 : 0}`,\n  'mkdir -p \"$S\" && cd \"$S\" || exit 1',\n  ''\n].join('\\n');\nreturn [{ json: { job_dir: `${c.run_dir}/${STAGE}`, script: header + BODY, max_minutes: MAX_MINUTES } }];\n"
+      }
+    },
+    {
+      "id": "44eb6359-fed1-4795-8503-d1accba04e44",
+      "name": "Run Diff",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "QptyXc2oFNL8f8gX",
+          "cachedResultName": "ASM · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "b7db8ab6-42c9-4150-823f-8338ce70f10e",
+      "name": "Read Delta",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        880,
+        300
+      ],
+      "parameters": {
+        "executeOnce": true,
+        "command": "=F='{{ $('When Called').first().json.run_dir }}/diff/delta.jsonl'\ncase \"$F\" in /opt/loot/asm/*/*/diff/delta.jsonl) ;; *) echo 'bad path' >&2; exit 1;; esac\nif [ -s \"$F\" ]; then jq -s -c '.[:500]' \"$F\"; else echo '[]'; fi"
+      }
+    },
+    {
+      "id": "0e5c3b9a-1f1a-4fda-8687-fbd579bb56c4",
+      "name": "Asset Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        160
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst rows = JSON.parse($input.first().json.stdout || '[]');\nconst now = new Date().toISOString();\nreturn rows.map((d) => ({ json: {\n  asset_key: d.asset_key,\n  engagement: ctx.engagement,\n  change: d.change,\n  kind: d.kind,\n  host: d.host || '',\n  ip: d.ip || '',\n  port: Number(d.port) || 0,\n  service: String(d.service || '').slice(0, 200),\n  url: d.url || '',\n  status_code: Number(d.status_code) || 0,\n  title: String(d.title || '').slice(0, 200),\n  tech: d.tech || '',\n  fingerprint: d.fingerprint || '',\n  run_id: ctx.run_id,\n  seen_at: now\n} }));\n"
+      }
+    },
+    {
+      "id": "55ba3ab7-14e1-4702-b922-708d9d6f2723",
+      "name": "New Asset?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        160
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.change }}",
+              "rightValue": "new",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "c2d1c353-9d05-4b7d-8e71-8d4c8e4b5b6b",
+      "name": "Upsert New Asset",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1320,
+        80
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_assets",
+          "cachedResultName": "asm_assets"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "asset_key",
+              "condition": "eq",
+              "keyValue": "={{ $json.asset_key }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "asset_key": "={{ $json.asset_key }}",
+            "engagement": "={{ $json.engagement }}",
+            "kind": "={{ $json.kind }}",
+            "host": "={{ $json.host }}",
+            "ip": "={{ $json.ip }}",
+            "port": "={{ $json.port }}",
+            "service": "={{ $json.service }}",
+            "url": "={{ $json.url }}",
+            "status_code": "={{ $json.status_code }}",
+            "title": "={{ $json.title }}",
+            "tech": "={{ $json.tech }}",
+            "fingerprint": "={{ $json.fingerprint }}",
+            "last_seen": "={{ $json.seen_at }}",
+            "run_id": "={{ $json.run_id }}",
+            "first_seen": "={{ $json.seen_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "asset_key",
+              "displayName": "asset_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "engagement",
+              "displayName": "engagement",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "kind",
+              "displayName": "kind",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "host",
+              "displayName": "host",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ip",
+              "displayName": "ip",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "port",
+              "displayName": "port",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "service",
+              "displayName": "service",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "url",
+              "displayName": "url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status_code",
+              "displayName": "status_code",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "tech",
+              "displayName": "tech",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "fingerprint",
+              "displayName": "fingerprint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "first_seen",
+              "displayName": "first_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_seen",
+              "displayName": "last_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "run_id",
+              "displayName": "run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "ec425e22-838e-4af3-81c8-5167d26fa381",
+      "name": "Update Changed Asset",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1320,
+        240
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_assets",
+          "cachedResultName": "asm_assets"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "asset_key",
+              "condition": "eq",
+              "keyValue": "={{ $json.asset_key }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "asset_key": "={{ $json.asset_key }}",
+            "engagement": "={{ $json.engagement }}",
+            "kind": "={{ $json.kind }}",
+            "host": "={{ $json.host }}",
+            "ip": "={{ $json.ip }}",
+            "port": "={{ $json.port }}",
+            "service": "={{ $json.service }}",
+            "url": "={{ $json.url }}",
+            "status_code": "={{ $json.status_code }}",
+            "title": "={{ $json.title }}",
+            "tech": "={{ $json.tech }}",
+            "fingerprint": "={{ $json.fingerprint }}",
+            "last_seen": "={{ $json.seen_at }}",
+            "run_id": "={{ $json.run_id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "asset_key",
+              "displayName": "asset_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "engagement",
+              "displayName": "engagement",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "kind",
+              "displayName": "kind",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "host",
+              "displayName": "host",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ip",
+              "displayName": "ip",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "port",
+              "displayName": "port",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "service",
+              "displayName": "service",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "url",
+              "displayName": "url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status_code",
+              "displayName": "status_code",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "tech",
+              "displayName": "tech",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "fingerprint",
+              "displayName": "fingerprint",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "first_seen",
+              "displayName": "first_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_seen",
+              "displayName": "last_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "run_id",
+              "displayName": "run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c6d9f7b2-9366-4ff7-873e-4646c1b23f76",
+      "name": "Return Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        460
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst r = $('Run Diff').first().json;\nconst stages = { ...(ctx.stages ?? {}), diff: { ...(r.result ?? {}), rc: r.rc, timed_out: r.timed_out } };\nreturn [{ json: { ...ctx, stages } }];\n"
+      }
+    },
+    {
+      "id": "38096153-d4c3-4ae0-8345-a6ac170e6d30",
+      "name": "Persist Service State",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "command": "=R='{{ $('When Called').first().json.run_dir }}'\ncase \"$R\" in /opt/loot/asm/*/2*Z-*) ;; *) echo 'bad run dir' >&2; exit 1;; esac\nST=\"${R%/*}/state\"\nmkdir -p \"$ST\"\nif [ -s \"$R/ports/services.jsonl\" ]; then\n  { if [ -s \"$ST/services.json\" ]; then cat \"$ST/services.json\"; else echo '{}'; fi; jq -s 'map({key: \"\\(.ip):\\(.port)\", value: .}) | from_entries' \"$R/ports/services.jsonl\"; } | jq -s 'add' > \"$ST/services.json.tmp\" && mv \"$ST/services.json.tmp\" \"$ST/services.json\"\nfi\nif [ -s \"$R/web/web.jsonl\" ]; then cp \"$R/web/web.jsonl\" \"$ST/web_latest.jsonl.tmp\" && mv \"$ST/web_latest.jsonl.tmp\" \"$ST/web_latest.jsonl\"; fi\njq -nc --arg s \"$(jq 'length' \"$ST/services.json\" 2>/dev/null || echo 0)\" '{services_state: $s}' ",
+        "executeOnce": true
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Build Diff Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Diff Script": {
+      "main": [
+        [
+          {
+            "node": "Run Diff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Delta": {
+      "main": [
+        [
+          {
+            "node": "Asset Rows",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Return Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Asset Rows": {
+      "main": [
+        [
+          {
+            "node": "New Asset?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New Asset?": {
+      "main": [
+        [
+          {
+            "node": "Upsert New Asset",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Changed Asset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Diff": {
+      "main": [
+        [
+          {
+            "node": "Persist Service State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Persist Service State": {
+      "main": [
+        [
+          {
+            "node": "Read Delta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [
+    {
+      "id": "a7d7167f-6dc4-4357-9523-d71bf058856a",
+      "name": "Record delta in asm_assets",
+      "nodeIds": [
+        "0e5c3b9a-1f1a-4fda-8687-fbd579bb56c4",
+        "55ba3ab7-14e1-4702-b922-708d9d6f2723",
+        "c2d1c353-9d05-4b7d-8e71-8d4c8e4b5b6b",
+        "ec425e22-838e-4af3-81c8-5167d26fa381"
+      ],
+      "description": "New assets get first_seen; changed assets keep it. Runs before Return Context (higher on canvas, v1 order)."
+    }
+  ],
+  "sourceWorkflowId": null,
+  "tags": []
+}

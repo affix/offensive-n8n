@@ -1,0 +1,173 @@
+{
+  "id": "nQ5IKz2tZ8T66G58",
+  "name": "ASM · 07 Triage (Ollama)",
+  "description": "Scores false-positive likelihood (0 real, 100 noise) and a one-line note per new finding via the local Ollama API (max 25 per run). Advisory only.",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "bca2615e-26cd-4d85-ba66-b2e95676528a",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "findings",
+        "options": {}
+      },
+      "id": "b56fe254-3896-48c9-be6a-a721f96ea70a",
+      "name": "Split Findings",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        224,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "maxItems": 25
+      },
+      "id": "0c3ec576-826a-48fd-a336-6331c4265224",
+      "name": "Limit Findings",
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        448,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $('Build Prompts').all();\nconst outs = $input.all();\nconst triage = {};\nsrc.forEach((it, i) => {\n  const o = outs[i]?.json ?? {};\n  const text = o.message?.content ?? '';\n  let fp = null;\n  let note = '';\n  if (text) {\n    const m = String(text).match(/\\{[\\s\\S]*\\}/);\n    try {\n      const p = JSON.parse(m ? m[0] : text);\n      const n = parseInt(p.false_positive_percent ?? p.fp_likelihood, 10);\n      fp = Number.isNaN(n) ? null : Math.max(0, Math.min(100, n));\n      note = String(p.summary ?? '').replace(/\\s+/g, ' ').trim().slice(0, 300);\n    } catch (e) {\n      note = '';\n    }\n  }\n  if (!note) note = o.error ? 'triage unavailable' : 'triage output unparseable';\n  triage[it.json.finding_key] = { fp_likelihood: fp, note };\n});\nreturn [{ json: { triage, triaged: src.length } }];\n"
+      },
+      "id": "68c53790-a781-40e8-a337-5067211b1d19",
+      "name": "Collect Triage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "id": "65cc00fe-000e-4702-8acc-5b27a10be875",
+      "name": "Build Prompts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const MODEL = 'OLLAMA_MODEL';\nconst SYSTEM = [\n  'You triage automated scanner output for a penetration tester during an authorised external attack surface assessment.',\n  'Judge only from the evidence given. Reply with JSON only, exactly this shape:',\n  '{\"false_positive_percent\": <integer 0-100>, \"summary\": \"<one sentence, max 25 words>\"}',\n  'false_positive_percent: 0 means the finding is certainly real and exploitable as described, 100 means it is certainly scanner noise.',\n  'summary: what the issue is and why it matters, or why it is probably noise.'\n].join('\\n');\nreturn $input.all().map((it) => {\n  const f = it.json;\n  const user = [\n    `Source tool: ${f.source}`,\n    `Template: ${f.template_id}`,\n    `Name: ${f.name}`,\n    `Severity: ${f.severity}`,\n    `Matched at: ${f.matched_at}`,\n    `Evidence: ${String(f.detail || 'none').slice(0, 600)}`\n  ].join('\\n');\n  return { json: {\n    finding_key: f.finding_key,\n    body: {\n      model: MODEL,\n      stream: false,\n      think: false,\n      format: 'json',\n      keep_alive: '15m',\n      options: { temperature: 0.1, num_predict: 200 },\n      messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }]\n    }\n  } };\n});\n",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "1bb93c53-ba3c-42f2-9f94-77d12bed03d3",
+      "name": "Ask Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        300
+      ],
+      "parameters": {
+        "contentType": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "method": "POST",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchInterval": 0,
+              "batchSize": 1
+            }
+          },
+          "timeout": 180000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "http://OLLAMA_HOST:11434/api/chat"
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Split Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Findings": {
+      "main": [
+        [
+          {
+            "node": "Limit Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Limit Findings": {
+      "main": [
+        [
+          {
+            "node": "Build Prompts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompts": {
+      "main": [
+        [
+          {
+            "node": "Ask Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Ollama": {
+      "main": [
+        [
+          {
+            "node": "Collect Triage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

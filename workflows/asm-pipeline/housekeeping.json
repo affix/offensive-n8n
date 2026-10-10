@@ -1,0 +1,424 @@
+{
+  "id": "52kFhrqTWH4IgxUJ",
+  "name": "ASM · Housekeeping",
+  "description": "Nightly: compress run dirs older than 14 days (never the latest), flag stale runs and locks, update nuclei templates, check pinned images, disk usage. Discord on issues plus Monday summary.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "9bd2864e-4c87-47c3-8f18-2e39ffe2e95a",
+      "name": "Nightly 03:17",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 3,
+              "triggerAtMinute": 17
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "d9c28be9-0c03-4b71-a4c3-ff5ebecf5673",
+      "name": "Build Housekeeping Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STAGE = 'housekeeping';\nconst MAX_MINUTES = 120;\nconst BODY = \"L=/opt/loot/asm\\nRETAIN_DAYS=14\\nIMAGES=\\\"projectdiscovery/httpx:v1.12.0 projectdiscovery/alterx:v0.0.6 projectdiscovery/mapcidr:v1.1.16 projectdiscovery/cdncheck:v1.1.36 hahwul/dalfox:v2.12.0\\\"\\n\\ndisk_pct=$(df -P /opt/loot | awk 'NR==2 {gsub(\\\"%\\\",\\\"\\\",$5); print $5}')\\nbefore_mb=$(du -sm \\\"$L\\\" 2>/dev/null | cut -f1)\\n\\n: > compressed.txt\\n: > skipped_busy.txt\\nfor eng in \\\"$L\\\"/*/; do\\n  e=$(basename \\\"$eng\\\")\\n  case \\\"$e\\\" in _cache) continue;; esac\\n  latest=$(ls -d \\\"$eng\\\"2*T*Z-*/ 2>/dev/null | sort | tail -1)\\n  for d in \\\"$eng\\\"2*T*Z-*/; do\\n    [ -d \\\"$d\\\" ] || continue\\n    [ \\\"$d\\\" = \\\"$latest\\\" ] && continue\\n    [ -n \\\"$(find \\\"$d\\\" -maxdepth 0 -mtime +\\\"$RETAIN_DAYS\\\" 2>/dev/null)\\\" ] || continue\\n    busy=0\\n    for j in \\\"$d\\\"*/job.sh; do\\n      [ -f \\\"$j\\\" ] || continue\\n      [ -f \\\"$(dirname \\\"$j\\\")/.done\\\" ] || busy=1\\n    done\\n    if [ \\\"$busy\\\" = 1 ]; then echo \\\"$d\\\" >> skipped_busy.txt; continue; fi\\n    name=$(basename \\\"$d\\\")\\n    if tar -czf \\\"$eng$name.tar.gz\\\" -C \\\"$eng\\\" \\\"$name\\\" 2>>tar.log && rm -rf \\\"$d\\\"; then\\n      echo \\\"$e/$name\\\" >> compressed.txt\\n    fi\\n  done\\ndone\\n\\nafter_mb=$(du -sm \\\"$L\\\" 2>/dev/null | cut -f1)\\nfind \\\"$L\\\" -mindepth 2 -maxdepth 2 -name .lock -type d -mmin +960 2>/dev/null | sed \\\"s#^$L/##\\\" > stale_locks.txt\\n\\ntpl_before=$(nuclei -templates-version 2>&1 | grep -oE 'v[0-9]+\\\\.[0-9]+\\\\.[0-9]+' | tail -1)\\ntimeout 10m nuclei -update-templates -silent > nuclei_update.log 2>&1\\ntpl_rc=$?\\ntpl_after=$(nuclei -templates-version 2>&1 | grep -oE 'v[0-9]+\\\\.[0-9]+\\\\.[0-9]+' | tail -1)\\n\\n: > missing_images.txt\\nfor img in $IMAGES; do\\n  docker image inspect \\\"$img\\\" >/dev/null 2>&1 || echo \\\"$img\\\" >> missing_images.txt\\ndone\\n\\njq -n \\\\\\n  --argjson disk \\\"${disk_pct:-0}\\\" --argjson before \\\"${before_mb:-0}\\\" --argjson after \\\"${after_mb:-0}\\\" \\\\\\n  --arg tb \\\"$tpl_before\\\" --arg ta \\\"$tpl_after\\\" --argjson trc \\\"$tpl_rc\\\" \\\\\\n  --rawfile comp compressed.txt --rawfile busy skipped_busy.txt --rawfile locks stale_locks.txt --rawfile imgs missing_images.txt \\\\\\n  '{disk_pct: $disk, loot_mb_before: $before, loot_mb_after: $after,\\n    compressed: ($comp | split(\\\"\\\\n\\\") | map(select(length > 0))),\\n    skipped_busy: ($busy | split(\\\"\\\\n\\\") | map(select(length > 0))),\\n    stale_locks: ($locks | split(\\\"\\\\n\\\") | map(select(length > 0))),\\n    missing_images: ($imgs | split(\\\"\\\\n\\\") | map(select(length > 0))),\\n    templates_before: $tb, templates_after: $ta, templates_rc: $trc}' > result.json\\n\";\nconst EXTRA = [];\nconst stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\\.\\d+Z$/, 'Z');\nconst rand = Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0');\nconst job_dir = `/opt/loot/asm/_sys/${stamp}-${rand}/${STAGE}`;\nconst header = [\n  '#!/usr/bin/env bash',\n  'set -uo pipefail',\n  `S='${job_dir}'`,\n  ...EXTRA,\n  'mkdir -p \"$S\" && cd \"$S\" || exit 1',\n  ''\n].join('\\n');\nreturn [{ json: { job_dir, script: header + BODY, max_minutes: MAX_MINUTES } }];\n"
+      }
+    },
+    {
+      "id": "8d69cb35-0a0d-4ca5-8580-14b17e261991",
+      "name": "Run Now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "1f49eac1-0e56-41d6-99c4-187da5610867",
+      "name": "Run Housekeeping",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        460,
+        300
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "QptyXc2oFNL8f8gX",
+          "cachedResultName": "ASM · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "9da576f8-1cd7-491b-af3d-39af70c98651",
+      "name": "Get Running Runs",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        680,
+        300
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_runs",
+          "cachedResultName": "asm_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "status",
+              "condition": "eq",
+              "keyValue": "running"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "f744b316-ec97-4bb3-9600-0f6b95f8d552",
+      "name": "Evaluate Health",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STALE_HOURS = 18;\nconst DISK_WARN = 80;\nconst job = $('Run Housekeeping').first().json;\nconst r = job.result ?? {};\nconst now = Date.now();\nconst running = $input.all().map((i) => i.json).filter((x) => x && x.run_id && x.status === 'running');\nconst stale = running.filter((x) => now - Date.parse(x.started) > STALE_HOURS * 3600e3)\n  .map((x) => ({ run_id: x.run_id, engagement: x.engagement, started: x.started }));\n\nconst issues = [];\nif ((r.disk_pct ?? 0) >= DISK_WARN) issues.push(`Disk at ${r.disk_pct}% on /opt/loot`);\nif (stale.length) issues.push(`${stale.length} run(s) stuck in 'running' for over ${STALE_HOURS}h: ${stale.map((s) => `${s.engagement}/${s.run_id}`).join(', ')}`);\nif (r.stale_locks?.length) issues.push(`Stale engagement locks: ${r.stale_locks.join(', ')}`);\nif (r.missing_images?.length) issues.push(`Missing Docker images: ${r.missing_images.join(', ')}`);\nif (r.templates_rc && r.templates_rc !== 0) issues.push(`nuclei template update failed (rc=${r.templates_rc})`);\nif (job.timed_out) issues.push('Housekeeping job timed out');\n\nconst weekly = new Date().getUTCDay() === 1;\nconst freed = (r.loot_mb_before ?? 0) - (r.loot_mb_after ?? 0);\nconst fields = [\n  { name: 'Disk', value: `${r.disk_pct ?? '?'}% used`, inline: true },\n  { name: '/opt/loot', value: `${r.loot_mb_after ?? '?'} MB${freed > 0 ? ` (freed ${freed} MB)` : ''}`, inline: true },\n  { name: 'Templates', value: `${r.templates_before || '?'} → ${r.templates_after || '?'}`, inline: true },\n  { name: 'Runs compressed', value: String(r.compressed?.length ?? 0), inline: true }\n];\nif (issues.length) fields.unshift({ name: 'Needs attention', value: issues.map((i) => `• ${i}`).join('\\n').slice(0, 1024) });\n\nreturn [{ json: {\n  stale,\n  post: issues.length > 0 || weekly,\n  embed: {\n    title: issues.length ? '⚠️ ASM housekeeping: attention needed' : '🧹 ASM weekly housekeeping',\n    color: issues.length ? 0xF39C12 : 0x2ECC71,\n    fields,\n    footer: { text: 'ASM · Housekeeping' },\n    timestamp: new Date().toISOString()\n  }\n} }];\n"
+      }
+    },
+    {
+      "id": "86fc476e-c520-49b1-bf2e-e244fe619380",
+      "name": "Stale Runs",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        160
+      ],
+      "parameters": {
+        "fieldToSplitOut": "stale",
+        "include": "noOtherFields"
+      }
+    },
+    {
+      "id": "b8509f19-3d1f-4f93-96a4-da04ebb1de28",
+      "name": "Mark Run Stale",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1340,
+        160
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_runs",
+          "cachedResultName": "asm_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "run_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.run_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "stale",
+            "error": "No close-out recorded within 18h (orchestrator crashed or was stopped)"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "error",
+              "displayName": "error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b5286d5f-e7f4-4cd3-939f-c2dd61c5f309",
+      "name": "Worth Posting?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1120,
+        440
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.post }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "eb9a8c6c-21e2-41ac-8ae7-2cebca5aa275",
+      "name": "Post Health Report",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        420
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "authentication": "botToken",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "sendTo": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "webhookId": "7babe3a2-eb70-4762-8a0a-ddcdd902102d"
+    }
+  ],
+  "connections": {
+    "Nightly 03:17": {
+      "main": [
+        [
+          {
+            "node": "Build Housekeeping Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Housekeeping Script": {
+      "main": [
+        [
+          {
+            "node": "Run Housekeeping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Now": {
+      "main": [
+        [
+          {
+            "node": "Build Housekeeping Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Housekeeping": {
+      "main": [
+        [
+          {
+            "node": "Get Running Runs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Running Runs": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Health": {
+      "main": [
+        [
+          {
+            "node": "Stale Runs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Worth Posting?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Stale Runs": {
+      "main": [
+        [
+          {
+            "node": "Mark Run Stale",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Worth Posting?": {
+      "main": [
+        [
+          {
+            "node": "Post Health Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "errorWorkflow": "oTbFYlbhb8Dlg0CM"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

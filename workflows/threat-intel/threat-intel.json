@@ -1,0 +1,313 @@
+{
+  "id": "GDj2uX9tupRmNHmx",
+  "name": "Threat Intel",
+  "description": null,
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Threat Intel Report",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "IP Address or Domain"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -400,
+        320
+      ],
+      "id": "592924a8-324e-4ce4-8059-9c3ed7083c89",
+      "name": "On form submission",
+      "webhookId": "92f1fa52-f903-41b8-ad49-07040112b735"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json['IP Address or Domain'] }}",
+                    "rightValue": "=\\b(?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\b",
+                    "operator": {
+                      "type": "string",
+                      "operation": "regex"
+                    },
+                    "id": "2daa13d1-c1a5-453d-9e66-8d65f223b7e9"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "0ae105a7-de3d-4bea-aa87-22110d4de0b3",
+                    "leftValue": "={{ $json['IP Address or Domain'] }}",
+                    "rightValue": "^([a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,}$",
+                    "operator": {
+                      "type": "string",
+                      "operation": "regex"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -176,
+        320
+      ],
+      "id": "4cf5e945-c720-44d3-924c-f913e7cec432",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "url": "=https://dns.google.com/resolve?name={{ $json['IP Address or Domain'] }}&type=A",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        48,
+        416
+      ],
+      "id": "70c9c140-fb47-4b6f-91d7-46813e3959ae",
+      "name": "Resolve DNS"
+    },
+    {
+      "parameters": {
+        "jsCode": "let ips = []\nfor( const ip of $input.first().json['Answer']) {\n  ips.push(ip['data'])\n}\n\nreturn [{ json: {ips}} ];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        416
+      ],
+      "id": "95308c5b-6b77-43d7-a9b0-38c31372020c",
+      "name": "Get IPs"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "ips",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        496,
+        416
+      ],
+      "id": "87a4d298-06f5-4db5-8f72-93af64ffdeb6",
+      "name": "Split Out"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        752,
+        304
+      ],
+      "id": "27b5dcdb-e993-4899-aab1-ae0d13933a1f",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "html": "<!DOCTYPE html>\n<html lang=\"en-GB\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">\n<title>IP enrichment report</title>\n<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>\n<link href=\"https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">\n<style>\n:root{\n  --paper:#EEF1F3; --sheet:#FFFFFF; --ink:#1B2733; --ink-2:#4B5966; --rule:#D3DAE0;\n  --clean:#2E7D6B; --info:#4A6FA5; --susp:#B9790B; --mal:#B3261E; --gap:#7A6A9E;\n  --clean-bg:#E3F1ED; --info-bg:#E6ECF5; --susp-bg:#FBF0DA; --mal-bg:#F8E3E1; --gap-bg:#EEEAF5;\n  --sans:\"IBM Plex Sans\",system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif;\n  --mono:\"IBM Plex Mono\",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;\n  box-sizing:border-box;\n  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);\n}\n@media (prefers-color-scheme:dark){\n  :root:not([data-theme=\"light\"]){\n    --paper:#141B22; --sheet:#1B242D; --ink:#E4E9EE; --ink-2:#97A4B0; --rule:#2C3843;\n    --clean:#4FB79E; --info:#7B9FD6; --susp:#E0A63A; --mal:#E5675E; --gap:#A897CF;\n    --clean-bg:#173229; --info-bg:#1C2940; --susp-bg:#3A2D12; --mal-bg:#3F1C1A; --gap-bg:#2A2438;\n  }\n}\n:root[data-theme=\"dark\"]{\n  --paper:#141B22; --sheet:#1B242D; --ink:#E4E9EE; --ink-2:#97A4B0; --rule:#2C3843;\n  --clean:#4FB79E; --info:#7B9FD6; --susp:#E0A63A; --mal:#E5675E; --gap:#A897CF;\n  --clean-bg:#173229; --info-bg:#1C2940; --susp-bg:#3A2D12; --mal-bg:#3F1C1A; --gap-bg:#2A2438;\n}\n*,*::before,*::after{box-sizing:inherit}\nhtml{scroll-padding-top:env(safe-area-inset-top,0px)}\nbody{margin:0;background:var(--paper);color:var(--ink);font:15px/1.55 var(--sans);-webkit-font-smoothing:antialiased}\n.wrap{max-width:1180px;margin:0 auto;padding:40px 24px 64px}\na{color:var(--info)}\nbutton,input{font:inherit;color:inherit}\n:focus-visible{outline:2px solid var(--info);outline-offset:2px}\n.ip{font-family:var(--mono);font-weight:500}\n\n/* Masthead */\n.mast{display:grid;grid-template-columns:1fr auto;gap:8px 24px;align-items:end;border-bottom:2px solid var(--ink);padding-bottom:14px}\n.mast .org{font-weight:600;font-size:14px;color:var(--ink-2)}\n.mast .meta{font-size:13px;color:var(--ink-2);text-align:right}\n.mast h1{margin:2px 0 0;font-size:22px;font-weight:600;letter-spacing:-.01em}\n\n/* Hero verdict */\n.verdict{padding:36px 0 28px;max-width:62ch}\n.verdict p{margin:0;font-size:clamp(26px,4vw,40px);line-height:1.18;font-weight:600;letter-spacing:-.02em}\n.verdict .sub{margin-top:14px;font-size:15px;font-weight:400;color:var(--ink-2);letter-spacing:0;line-height:1.55}\n\n/* Tally */\n.tally{display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--rule);background:var(--sheet);border-radius:6px;overflow:hidden}\n.tally b{display:block;font-size:26px;font-weight:600;line-height:1.1;color:var(--c,var(--ink))}\n.tally span{font-size:13px;color:var(--ink-2)}\n\n\n/* Ledger table */\n.ledger-wrap{overflow-x:auto;border:1px solid var(--rule);border-radius:6px;background:var(--sheet)}\ntable{width:100%;border-collapse:collapse;font-size:14px;min-width:880px}\nth{text-align:left;font-weight:500;color:var(--ink-2);padding:10px 14px;border-bottom:1px solid var(--rule);white-space:nowrap}\ntd{padding:11px 14px;border-bottom:1px solid var(--rule);vertical-align:middle}\ntr:last-child td{border-bottom:0}\ntbody tr{cursor:pointer}\ntbody tr:hover{background:var(--paper)}\n.muted{color:var(--ink-2)}\n.num{font-variant-numeric:tabular-nums}\n\n/* The signature element: source consensus strip */\n.strip{display:inline-grid;grid-template-columns:repeat(4,22px);gap:3px;vertical-align:middle}\n.strip i{height:18px;border-radius:2px;background:var(--rule)}\n.strip i[data-v=\"clean\"]{background:var(--clean)}\n.strip i[data-v=\"info\"]{background:var(--info)}\n.strip i[data-v=\"susp\"]{background:var(--susp)}\n.strip i[data-v=\"mal\"]{background:var(--mal)}\n.strip i[data-v=\"gap\"]{background:repeating-linear-gradient(135deg,var(--gap) 0 3px,transparent 3px 6px);outline:1px solid var(--gap);outline-offset:-1px}\n.strip-key{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--ink-2);margin:10px 2px 0}\n.strip-key span{display:inline-flex;align-items:center;gap:6px}\n.strip-key i{width:12px;height:12px;border-radius:2px;display:inline-block}\n\n.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:13px;font-weight:600;white-space:nowrap;color:var(--c);background:var(--cb)}\n[data-v=\"clean\"]{--c:var(--clean);--cb:var(--clean-bg)}\n[data-v=\"info\"]{--c:var(--info);--cb:var(--info-bg)}\n[data-v=\"susp\"]{--c:var(--susp);--cb:var(--susp-bg)}\n[data-v=\"mal\"]{--c:var(--mal);--cb:var(--mal-bg)}\n[data-v=\"gap\"]{--c:var(--gap);--cb:var(--gap-bg)}\n\n.vtbar{display:flex;width:110px;height:8px;border-radius:2px;overflow:hidden;background:var(--rule);vertical-align:middle}\n.vtbar span{display:block;height:100%}\n\n/* Detail dossiers */\nh2{font-size:18px;font-weight:600;margin:44px 0 14px}\n.dossier{background:var(--sheet);border:1px solid var(--rule);border-left:4px solid var(--c);border-radius:6px;margin-bottom:16px}\n.dossier>summary{list-style:none;display:grid;grid-template-columns:auto 1fr auto auto;gap:16px;align-items:center;padding:16px 20px;cursor:pointer}\n.dossier>summary::-webkit-details-marker{display:none}\n.dossier>summary .ip{font-size:19px}\n.dossier>summary .rdns{font-size:13px;color:var(--ink-2);font-family:var(--mono)}\n.chev{transition:transform .15s;color:var(--ink-2)}\n.dossier[open] .chev{transform:rotate(90deg)}\n@media (prefers-reduced-motion:reduce){ .chev{transition:none} }\n.risk{display:flex;align-items:baseline;gap:4px}\n.risk b{font-size:22px;color:var(--c);font-variant-numeric:tabular-nums}\n.risk span{font-size:12px;color:var(--ink-2)}\n.body{border-top:1px solid var(--rule);padding:4px 20px 20px}\n.notes{margin:14px 0 4px;padding:0;list-style:none;display:grid;gap:6px}\n.notes li{font-size:14px;padding:8px 12px;border-radius:4px;background:var(--cb);color:var(--ink)}\n.notes li strong{color:var(--c)}\n.sources{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin-top:14px}\n.src{border:1px solid var(--rule);border-radius:4px;padding:12px 14px;border-top:3px solid var(--c,var(--rule))}\n.src h3{margin:0 0 8px;font-size:14px;font-weight:600;display:flex;justify-content:space-between;align-items:center;gap:8px}\n.src dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px}\n.src dt{color:var(--ink-2)}\n.src dd{margin:0;word-break:break-word}\n.src .empty{font-size:13px;color:var(--ink-2);margin:0}\n.pulses{margin:10px 0 0;padding:0;list-style:none;font-size:13px;display:grid;gap:6px}\n.pulses li{padding-top:6px;border-top:1px dashed var(--rule)}\n.pulses .pm{color:var(--ink-2);font-size:12px}\n.tag{display:inline-block;font-family:var(--mono);font-size:11px;padding:1px 6px;border:1px solid var(--rule);border-radius:3px;margin:2px 3px 0 0}\n.raw{margin-top:14px}\n.raw summary{cursor:pointer;font-size:13px;color:var(--ink-2)}\n.raw pre{max-height:320px;overflow:auto;font:12px/1.5 var(--mono);background:var(--paper);padding:12px;border-radius:4px;margin:8px 0 0}\n\n.empty-state{padding:32px;text-align:center;color:var(--ink-2);background:var(--sheet);border:1px dashed var(--rule);border-radius:6px}\nfooter{margin-top:48px;padding-top:14px;border-top:1px solid var(--rule);font-size:13px;color:var(--ink-2);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}\n\n@media (max-width:640px){\n  .wrap{padding:24px 16px 48px}\n  .mast{grid-template-columns:1fr}\n  .mast .meta{text-align:left}\n  .dossier>summary{grid-template-columns:1fr auto;gap:8px 12px}\n  .dossier>summary .strip,.dossier>summary .chev{display:none}\n}\n@media print{\n  :root{--paper:#fff;--sheet:#fff}\n  body{font-size:12px}\n  .raw,.chev{display:none!important}\n  .dossier{break-inside:avoid}\n  .dossier .body{display:block!important}\n}\n\n.tally>div{flex:1 1 120px;border-right:1px solid var(--rule);padding:14px 16px}\n.tally>div:last-child{border-right:0}\ntd a.ip{color:inherit;text-decoration:none}\ntd a.ip:hover{text-decoration:underline}\n.ledger-wrap{margin-top:24px}\n</style>\n</head>\n<body>\n{{ (() => {\n  /* ---------- config: edit these ---------- */\n  const CONFIG = { org: \"\", title: \"IP enrichment report\", caseRef: \"\", analyst: \"\" };\n\n  /* ---------- helpers ---------- */\n  const esc = s => String(s ?? \"\").replace(/&/g, \"&amp;\").replace(/</g, \"&lt;\").replace(/>/g, \"&gt;\").replace(/\"/g, \"&quot;\");\n  const fmtDate = x => {\n    if (x === undefined || x === null || x === \"\") return \"\";\n    const d = typeof x === \"number\" ? new Date(x * 1000) : new Date(x);\n    return d.getTime() !== d.getTime() ? esc(x) : d.toISOString().slice(0, 16).replace(\"T\", \" \") + \" UTC\";\n  };\n  const plural = (k, w) => k + \" \" + w + (k === 1 ? \"\" : \"s\");\n  const anchor = ip => \"ioc-\" + String(ip).replace(/[^\\w]/g, \"-\");\n\n  /* ---------- input: flatten whatever n8n hands us ---------- */\n  const looksLikeSource = x => x && typeof x === \"object\" && !Array.isArray(x) &&\n    ((x.data && typeof x.data === \"object\" && !Array.isArray(x.data)) || x.pulse_info || x.indicator || x.error || x.details || (\"noise\" in x) || (\"riot\" in x));\n  const flatten = v => {\n    if (Array.isArray(v)) return v.flatMap(flatten);\n    if (!v || typeof v !== \"object\") return [];\n    if (looksLikeSource(v)) return [v];\n    const arrays = Object.values(v).filter(Array.isArray);\n    return arrays.length ? arrays.flatMap(flatten) : [];\n  };\n  const RAW = flatten($input.all().map(i => i.json));\n\n  /* ---------- classify + group by IP ---------- */\n  const isIP = s => typeof s === \"string\" && (/^(\\d{1,3}\\.){3}\\d{1,3}$/.test(s) || s.includes(\":\"));\n  const kindOf = it => {\n    if (it.data && (\"abuseConfidenceScore\" in it.data)) return \"abuse\";\n    if (it.data && it.data.type === \"ip_address\") return \"vt\";\n    if (it.pulse_info || (it.indicator && it.base_indicator)) return \"otx\";\n    return \"gn\";\n  };\n  const ipOf = (it, k) => k === \"abuse\" ? it.data.ipAddress : k === \"vt\" ? it.data.id : k === \"otx\" ? it.indicator : (it.details?.body ?? it).ip;\n  const groups = {};\n  const order = [];\n  let cursor = null;\n  for (const it of RAW) {\n    const k = kindOf(it);\n    const ip = ipOf(it, k);\n    if (isIP(ip)) cursor = ip;\n    if (!cursor) continue;\n    if (!groups[cursor]) { groups[cursor] = { ip: cursor }; order.push(cursor); }\n    groups[cursor][k] = it;\n  }\n\n  /* ---------- per-source assessment ---------- */\n  const assessVT = it => {\n    if (!it) return { v: \"gap\", label: \"No data\" };\n    const a = it.data.attributes ?? {};\n    const s = a.last_analysis_stats ?? {};\n    const mal = s.malicious ?? 0, sus = s.suspicious ?? 0, harm = s.harmless ?? 0, und = s.undetected ?? 0;\n    const total = mal + sus + harm + und + (s.timeout ?? 0);\n    const v = mal >= 3 ? \"mal\" : (mal >= 1 || sus >= 2) ? \"susp\" : \"clean\";\n    return { v, mal, sus, harm, und, total, a, label: mal + \"/\" + total };\n  };\n  const assessAbuse = it => {\n    if (!it) return { v: \"gap\", label: \"No data\" };\n    const d = it.data;\n    const score = d.abuseConfidenceScore ?? 0;\n    const v = score >= 75 ? \"mal\" : score >= 25 ? \"susp\" : (d.totalReports > 0 && !d.isWhitelisted) ? \"info\" : \"clean\";\n    return { v, score, d, label: score + \"%\" };\n  };\n  const assessGN = it => {\n    if (!it) return { v: \"gap\", label: \"No data\", state: \"missing\" };\n    const code = String(it.details?.httpCode ?? it.error?.status ?? \"200\");\n    const b = it.details?.body ?? it;\n    const err = it.details?.description ?? it.error?.message ?? \"\";\n    if (code === \"404\") return { v: \"clean\", label: \"Not observed\", state: \"unseen\", b };\n    if (code === \"429\") return { v: \"gap\", label: \"Rate limited\", state: \"ratelimit\", b, err };\n    if (it.error) return { v: \"gap\", label: \"Error \" + code, state: \"error\", b, err };\n    if (b.riot) return { v: \"clean\", label: \"Benign service\" + (b.name ? \": \" + b.name : \"\"), state: \"riot\", b };\n    const c = String(b.classification ?? \"\").toLowerCase();\n    if (c === \"malicious\") return { v: \"mal\", label: \"Malicious scanner\", state: \"noise\", b };\n    if (b.noise) return { v: c === \"benign\" ? \"info\" : \"susp\", label: c ? \"Scanner (\" + c + \")\" : \"Scanner\", state: \"noise\", b };\n    return { v: \"clean\", label: \"Not observed\", state: \"unseen\", b };\n  };\n  const assessOTX = it => {\n    if (!it) return { v: \"gap\", label: \"No data\", count: 0, pulses: [], families: [], adversaries: [], ttps: [] };\n    const pulses = it.pulse_info?.pulses ?? [];\n    const count = it.pulse_info?.count ?? pulses.length;\n    const families = [], adversaries = [], ttps = [];\n    const add = (arr, x) => { if (x && !arr.includes(x)) arr.push(x); };\n    for (const p of pulses) {\n      (p.malware_families ?? []).forEach(m => add(families, typeof m === \"string\" ? m : (m.display_name ?? m.name)));\n      add(adversaries, p.adversary);\n      (p.attack_ids ?? []).forEach(a => add(ttps, typeof a === \"string\" ? a : a.id));\n    }\n    const v = (families.length || adversaries.length) ? \"susp\" : count ? \"info\" : \"clean\";\n    return { v, count, pulses, families, adversaries, ttps, label: String(count), it };\n  };\n\n  /* ---------- verdicts ---------- */\n  const RANK = { gap: -1, clean: 0, info: 1, susp: 2, mal: 3 };\n  const LABEL = { clean: \"Clean\", info: \"Context only\", susp: \"Suspicious\", mal: \"Malicious\", gap: \"Unknown\" };\n  const records = order.map(ip => {\n    const r = groups[ip];\n    const vt = assessVT(r.vt), ab = assessAbuse(r.abuse), gn = assessGN(r.gn), otx = assessOTX(r.otx);\n    const allow = !!(ab.d?.isWhitelisted || gn.b?.riot);\n    let risk = Math.max(ab.score ?? 0, Math.min(100, (vt.mal ?? 0) * 15 + (vt.sus ?? 0) * 6), gn.v === \"mal\" ? 80 : gn.v === \"susp\" ? 40 : 0, otx.v === \"susp\" ? 35 : otx.count ? 8 : 0);\n    if (allow && (vt.mal ?? 0) < 3) risk = Math.round(risk / 2);\n    let v = [vt, ab, gn, otx].reduce((m, s) => RANK[s.v] > RANK[m] ? s.v : m, \"gap\");\n    if (allow && v === \"susp\") v = \"info\";\n    if (v === \"gap\") v = \"info\";\n    const gap = [vt, ab, gn, otx].some(s => s.v === \"gap\");\n\n    const notes = [];\n    if (allow) notes.push([\"clean\", \"<strong>Allowlisted infrastructure.</strong> \" + esc(ab.d?.isp ?? gn.b?.name ?? \"Known provider\") + \" is on the AbuseIPDB allowlist\" + (gn.b?.riot ? \" and GreyNoise RIOT\" : \"\") + \". Threat feed hits on shared infrastructure like this are usually collateral.\"]);\n    if (vt.mal) notes.push([vt.v, \"<strong>\" + plural(vt.mal, \"VirusTotal engine\") + \" flag this IP as malicious.</strong> Review vendor names before escalating.\"]);\n    if ((ab.score ?? 0) >= 25) notes.push([ab.v, \"<strong>AbuseIPDB confidence \" + ab.score + \"%</strong> across \" + ab.d.totalReports + \" reports from \" + ab.d.numDistinctUsers + \" users.\"]);\n    if (otx.families.length || otx.adversaries.length) notes.push([\"susp\", \"<strong>OTX links this IP to \" + esc(otx.families.concat(otx.adversaries).join(\", \")) + \".</strong>\"]);\n    else if (otx.ttps.length) notes.push([\"info\", \"<strong>\" + otx.ttps.length + \" ATT&amp;CK techniques</strong> appear in OTX pulses containing this IP. Pulses with thousands of indicators are bulk sandbox dumps, weigh accordingly.\"]);\n    if (gn.state === \"ratelimit\" || gn.state === \"error\") notes.push([\"gap\", \"<strong>GreyNoise lookup failed (\" + esc(gn.label.toLowerCase()) + \").</strong> \" + esc(gn.err) + \" Re-run or space out requests.\"]);\n    const cc = [ab.d?.countryCode, vt.a?.country, r.otx?.country_code].filter(x => x).filter((x, i, a) => a.indexOf(x) === i);\n    if (cc.length > 1) notes.push([\"info\", \"<strong>Geolocation disagrees across sources</strong> (\" + esc(cc.join(\" vs \")) + \"). Common for anycast and CDN ranges.\"]);\n    if (vt.a?.last_https_certificate?.subject?.CN === \"invalid2.invalid\") notes.push([\"info\", \"<strong>TLS answers with a placeholder certificate without SNI.</strong> Expected for Google front ends, explains the self-signed tag.\"]);\n\n    const hostnames = ab.d?.hostnames ?? [];\n    const asn = vt.a?.asn ? \"AS\" + vt.a.asn : String(r.otx?.asn ?? \"\").split(\" \")[0];\n    const owner = vt.a?.as_owner ?? ab.d?.isp ?? \"\";\n    return { ip, raw: r, vt, ab, gn, otx, allow, risk, v, gap, notes, hostnames, asn, owner };\n  }).sort((a, b) => (RANK[b.v] - RANK[a.v]) || (b.risk - a.risk));\n\n  /* ---------- fragments ---------- */\n  const strip = r => '<span class=\"strip\" title=\"VirusTotal, AbuseIPDB, GreyNoise, OTX\">' +\n    [r.vt, r.ab, r.gn, r.otx].map(s => '<i data-v=\"' + s.v + '\"></i>').join(\"\") + \"</span>\";\n  const pill = (v, text) => '<span class=\"pill\" data-v=\"' + v + '\">' + esc(text) + \"</span>\";\n  const vtBar = vt => {\n    if (!vt.total) return '<span class=\"muted\">No data</span>';\n    const pct = n => (n / vt.total * 100).toFixed(1);\n    return '<span class=\"vtbar\"><span style=\"width:' + pct(vt.mal) + '%;background:var(--mal)\"></span><span style=\"width:' + pct(vt.sus) + '%;background:var(--susp)\"></span><span style=\"width:' + pct(vt.harm) + '%;background:var(--clean)\"></span></span> <span class=\"num\">' + vt.mal + \"/\" + vt.total + \"</span>\";\n  };\n  const dl = pairs => \"<dl>\" + pairs.filter(p => p[1] !== undefined && p[1] !== null && p[1] !== \"\").map(p => \"<dt>\" + p[0] + \"</dt><dd>\" + p[1] + \"</dd>\").join(\"\") + \"</dl>\";\n  const tags = arr => (arr ?? []).map(t => '<span class=\"tag\">' + esc(t) + \"</span>\").join(\"\");\n  const link = (url, text) => '<a href=\"' + url + '\" target=\"_blank\" rel=\"noopener\">' + text + \"</a>\";\n  const srcCard = (title, s, body) => '<section class=\"src\" data-v=\"' + s.v + '\"><h3>' + title + pill(s.v, s.label) + \"</h3>\" + body + \"</section>\";\n\n  /* ---------- header + hero ---------- */\n  const n = records.length;\n  const count = v => records.filter(r => r.v === v).length;\n  const nMal = count(\"mal\"), nSus = count(\"susp\"), gaps = records.filter(r => r.gap).length;\n  let head;\n  if (!RAW.length) head = \"No input items reached this node.\";\n  else if (!n) head = \"No indicators found in the supplied data.\";\n  else if (nMal) head = plural(nMal, \"indicator\") + \" of \" + n + \" \" + (nMal === 1 ? \"looks\" : \"look\") + \" malicious and \" + (nMal === 1 ? \"needs\" : \"need\") + \" action.\";\n  else if (nSus) head = plural(nSus, \"indicator\") + \" of \" + n + \" \" + (nSus === 1 ? \"needs\" : \"need\") + \" a closer look. Nothing confirmed malicious.\";\n  else head = \"All \" + n + \" indicators came back clean or context only. Nothing to escalate.\";\n  const owners = records.map(r => r.owner).filter(x => x).filter((x, i, a) => a.indexOf(x) === i);\n  const sub = !RAW.length ? \"Check the node is wired after the enrichment lookups.\" :\n    !n ? \"Received \" + RAW.length + \" items but none matched AbuseIPDB, VirusTotal, GreyNoise or OTX response shapes.\" :\n    (owners.length ? \"Network owner\" + (owners.length > 1 ? \"s\" : \"\") + \": \" + esc(owners.slice(0, 4).join(\", \")) + (owners.length > 4 ? \" and \" + (owners.length - 4) + \" more\" : \"\") + \". \" : \"\") +\n    (gaps ? plural(gaps, \"indicator\") + \" \" + (gaps === 1 ? \"has\" : \"have\") + \" incomplete enrichment, so treat \" + (gaps === 1 ? \"that verdict\" : \"those verdicts\") + \" as provisional.\" : \"Every source returned data for every indicator.\");\n  const meta = [CONFIG.caseRef && \"Case \" + esc(CONFIG.caseRef), CONFIG.analyst && \"Analyst \" + esc(CONFIG.analyst), \"Generated \" + fmtDate(Date.now() / 1000)].filter(x => x).join(\"<br>\");\n\n  const tally = [[\"Indicators\", n, \"var(--ink)\"], [\"Malicious\", nMal, \"var(--mal)\"], [\"Suspicious\", nSus, \"var(--susp)\"], [\"Context only\", count(\"info\"), \"var(--info)\"], [\"Clean\", count(\"clean\"), \"var(--clean)\"], [\"Enrichment gaps\", gaps, \"var(--gap)\"]]\n    .map(t => '<div style=\"--c:' + t[2] + '\"><b class=\"num\">' + t[1] + \"</b><span>\" + t[0] + \"</span></div>\").join(\"\");\n\n  /* ---------- ledger ---------- */\n  const ledger = records.map(r =>\n    '<tr><td><a class=\"ip\" href=\"#' + anchor(r.ip) + '\">' + esc(r.ip) + '</a><br><span class=\"muted\" style=\"font-size:12px\">' + esc(r.hostnames[0] ?? \"\") + \"</span></td>\" +\n    \"<td>\" + strip(r) + \"</td><td>\" + pill(r.v, LABEL[r.v]) + \"</td>\" +\n    '<td class=\"num\" data-v=\"' + r.v + '\" style=\"color:var(--c);font-weight:600\">' + r.risk + \"</td>\" +\n    \"<td>\" + vtBar(r.vt) + \"</td>\" +\n    '<td class=\"num\">' + (r.ab.d ? r.ab.score + '% <span class=\"muted\">(' + r.ab.d.totalReports + \" rpts)</span>\" : '<span class=\"muted\">No data</span>') + \"</td>\" +\n    \"<td>\" + pill(r.gn.v, r.gn.label) + '</td><td class=\"num\">' + r.otx.count + \"</td>\" +\n    \"<td>\" + esc(r.asn) + ' <span class=\"muted\">' + esc(r.owner) + \"</span></td></tr>\"\n  ).join(\"\") || '<tr><td colspan=\"9\"><div class=\"empty-state\">No indicators to show.</div></td></tr>';\n\n  /* ---------- dossiers ---------- */\n  const dossiers = records.map(r => {\n    const vt = r.vt, ab = r.ab, gn = r.gn, otx = r.otx, enc = esc(r.ip);\n    const vtBody = vt.a ? dl([\n      [\"Detections\", vtBar(vt)], [\"Reputation\", vt.a.reputation],\n      [\"Community\", vt.a.total_votes ? vt.a.total_votes.malicious + \" malicious, \" + vt.a.total_votes.harmless + \" harmless\" : \"\"],\n      [\"ASN\", esc(r.asn) + \" \" + esc(vt.a.as_owner)],\n      [\"Network\", '<span class=\"ip\">' + esc(vt.a.network) + \"</span> (\" + esc(vt.a.regional_internet_registry ?? \"\") + \")\"],\n      [\"Country\", esc(vt.a.country)], [\"Tags\", tags(vt.a.tags)],\n      [\"TLS CN\", vt.a.last_https_certificate ? '<span class=\"ip\">' + esc(vt.a.last_https_certificate.subject?.CN) + \"</span>\" : \"\"],\n      [\"JARM\", vt.a.jarm ? '<span class=\"ip\" style=\"font-size:11px\">' + esc(vt.a.jarm) + \"</span>\" : \"\"],\n      [\"First seen\", fmtDate(vt.a.first_seen_date)], [\"Last scanned\", fmtDate(vt.a.last_analysis_date)],\n      [\"Link\", link(\"https://www.virustotal.com/gui/ip-address/\" + enc, \"Open in VirusTotal\")]\n    ]) : '<p class=\"empty\">No VirusTotal result in this run.</p>';\n    const abBody = ab.d ? dl([\n      [\"Confidence\", ab.score + \"%\"], [\"Reports\", ab.d.totalReports + \" from \" + ab.d.numDistinctUsers + \" users\"],\n      [\"Last report\", fmtDate(ab.d.lastReportedAt)], [\"Allowlisted\", ab.d.isWhitelisted ? \"Yes\" : \"No\"],\n      [\"Usage\", esc(ab.d.usageType)], [\"ISP\", esc(ab.d.isp)], [\"Domain\", esc(ab.d.domain)],\n      [\"Hostnames\", (ab.d.hostnames ?? []).map(h => '<span class=\"ip\">' + esc(h) + \"</span>\").join(\"<br>\")],\n      [\"Country\", esc(ab.d.countryCode)], [\"Tor\", ab.d.isTor ? \"Yes\" : \"No\"],\n      [\"Link\", link(\"https://www.abuseipdb.com/check/\" + enc, \"Open in AbuseIPDB\")]\n    ]) : '<p class=\"empty\">No AbuseIPDB result in this run.</p>';\n    const gnBody = gn.state === \"missing\" ? '<p class=\"empty\">No GreyNoise result in this run.</p>' :\n      (gn.state === \"ratelimit\" || gn.state === \"error\") ? dl([[\"Status\", esc(gn.label)], [\"Detail\", esc(gn.err)], [\"Plan\", esc([gn.b?.plan, gn.b?.rate_limit].filter(x => x).join(\", \"))], [\"Link\", link(\"https://viz.greynoise.io/ip/\" + enc, \"Open in GreyNoise\")]]) :\n      dl([[\"Noise\", gn.b?.noise ? \"Yes\" : \"No\"], [\"RIOT\", gn.b?.riot ? \"Yes\" : \"No\"], [\"Classification\", esc(gn.b?.classification ?? \"\")], [\"Name\", esc(gn.b?.name ?? \"\")], [\"Last seen\", esc(gn.b?.last_seen ?? \"\")], [\"Message\", esc(gn.b?.message ?? \"\")], [\"Link\", link(\"https://viz.greynoise.io/ip/\" + enc, \"Open in GreyNoise\")]]);\n    const pulses = otx.pulses.length ? '<ul class=\"pulses\">' + otx.pulses.map(p => \"<li>\" + esc(p.name) + '<div class=\"pm\">' + esc(p.author?.username ?? \"\") + \", TLP \" + esc(p.TLP ?? \"?\") + \", \" + fmtDate(p.created).slice(0, 10) + (p.indicator_count ? \", \" + p.indicator_count + \" IOCs\" : \"\") + \"</div></li>\").join(\"\") + \"</ul>\" : \"\";\n    const otxBody = r.raw.otx ? dl([\n      [\"Pulses\", otx.count], [\"ASN\", esc(r.raw.otx.asn)], [\"Geo\", esc(r.raw.otx.country_name)],\n      [\"Families\", tags(otx.families)], [\"ATT&amp;CK\", tags(otx.ttps)],\n      [\"Link\", link(\"https://otx.alienvault.com/indicator/ip/\" + enc, \"Open in OTX\")]\n    ]) + pulses : '<p class=\"empty\">No OTX result in this run.</p>';\n    return '<details class=\"dossier\" id=\"' + anchor(r.ip) + '\" data-v=\"' + r.v + '\"' + (r.v === \"mal\" || r.v === \"susp\" ? \" open\" : \"\") + \">\" +\n      '<summary><div><span class=\"ip\">' + esc(r.ip) + '</span><div class=\"rdns\">' + esc(r.hostnames.join(\", \")) + \"</div></div>\" +\n      \"<div>\" + strip(r) + ' <span style=\"margin-left:8px\">' + pill(r.v, LABEL[r.v]) + \"</span></div>\" +\n      '<div class=\"risk\"><b>' + r.risk + \"</b><span>/100</span></div>\" +\n      '<svg class=\"chev\" width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" aria-hidden=\"true\"><path d=\"M5 2l5 5-5 5\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\"/></svg></summary>' +\n      '<div class=\"body\">' + (r.notes.length ? '<ul class=\"notes\">' + r.notes.map(x => '<li data-v=\"' + x[0] + '\">' + x[1] + \"</li>\").join(\"\") + \"</ul>\" : \"\") +\n      '<div class=\"sources\">' + srcCard(\"VirusTotal\", vt, vtBody) + srcCard(\"AbuseIPDB\", ab, abBody) + srcCard(\"GreyNoise\", gn, gnBody) + srcCard(\"AlienVault OTX\", otx, otxBody) + \"</div></div></details>\";\n  }).join(\"\");\n\n  /* ---------- page ---------- */\n  return '<div class=\"wrap\">' +\n    '<header class=\"mast\"><div><div class=\"org\">' + esc(CONFIG.org) + \"</div><h1>\" + esc(CONFIG.title) + '</h1></div><div class=\"meta\">' + meta + \"</div></header>\" +\n    '<section class=\"verdict\"><p>' + head + '</p><p class=\"sub\">' + sub + \"</p></section>\" +\n    '<div class=\"tally\">' + tally + \"</div>\" +\n    '<div class=\"ledger-wrap\"><table><thead><tr><th>Indicator</th><th>Sources</th><th>Verdict</th><th>Risk</th><th>VirusTotal</th><th>AbuseIPDB</th><th>GreyNoise</th><th>OTX pulses</th><th>Network</th></tr></thead><tbody>' + ledger + \"</tbody></table></div>\" +\n    '<div class=\"strip-key\"><span>Source order: VirusTotal, AbuseIPDB, GreyNoise, OTX</span>' +\n    '<span><i style=\"background:var(--clean)\"></i>Clean</span><span><i style=\"background:var(--info)\"></i>Context only</span><span><i style=\"background:var(--susp)\"></i>Suspicious</span><span><i style=\"background:var(--mal)\"></i>Malicious</span>' +\n    '<span><i style=\"background:repeating-linear-gradient(135deg,var(--gap) 0 3px,transparent 3px 6px);outline:1px solid var(--gap)\"></i>No data</span></div>' +\n    \"<h2>Indicator detail</h2>\" + dossiers +\n    '<footer><span>' + n + \" indicators from \" + RAW.length + \" source responses</span><span>Verdicts are automated triage, confirm before acting.</span></footer></div>\";\n})() }}\n</body>\n</html>"
+      },
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1.2,
+      "position": [
+        992,
+        288
+      ],
+      "id": "70818862-1e94-424c-901a-dad94f94d8c6",
+      "name": "HTML"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "eu0VVUdYxslIgEeb",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/eu0VVUdYxslIgEeb",
+          "cachedResultName": "IP Threat Intel"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "ipAddress": "={{ $json['IP Address or Domain'] || $json['ips'] }}"
+          },
+          "matchingColumns": [
+            "ipAddress"
+          ],
+          "schema": [
+            {
+              "id": "ipAddress",
+              "displayName": "ipAddress",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        992,
+        464
+      ],
+      "id": "8f0fb390-76e4-4450-9a2b-13b46303fed0",
+      "name": "IP Threat Intel",
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Resolve DNS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve DNS": {
+      "main": [
+        [
+          {
+            "node": "Get IPs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get IPs": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "HTML",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IP Threat Intel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IP Threat Intel": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTML": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": true
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

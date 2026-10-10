@@ -1,0 +1,879 @@
+{
+  "id": "8v5IKaMRrWjiyUQS",
+  "name": "Wazuh · Honeypot Payload Analysis",
+  "description": "Every 15 min: pulls honeypot events from the Wazuh indexer, dedupes payloads by content into Postgres honeypot_payloads, extracts IOCs (URLs, IPs, commands, base64), LLM-analyses each new payload once, alerts Discord on interesting ones.",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "8be52d38-0c40-4383-8235-91d80171bdc7",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS honeypot_payloads (\n  payload_hash text PRIMARY KEY,\n  first_seen timestamptz,\n  last_seen timestamptz,\n  count int NOT NULL DEFAULT 0,\n  src_ips text[] NOT NULL DEFAULT '{}',\n  sensors text[] NOT NULL DEFAULT '{}',\n  method text,\n  path text,\n  query text,\n  headers jsonb,\n  body text,\n  detections jsonb,\n  cves text[],\n  categories text[],\n  decoded jsonb,\n  static_iocs jsonb,\n  weight int,\n  sample_alert_id text,\n  analysis jsonb,\n  interest int,\n  analysed_at timestamptz,\n  notified boolean NOT NULL DEFAULT false\n);\nALTER TABLE honeypot_payloads ADD COLUMN IF NOT EXISTS sig_hash text, ADD COLUMN IF NOT EXISTS sig_text text, ADD COLUMN IF NOT EXISTS ioc_keys text[];\nCREATE INDEX IF NOT EXISTS honeypot_payloads_last_seen_idx ON honeypot_payloads (last_seen);\nCREATE INDEX IF NOT EXISTS honeypot_payloads_interest_idx ON honeypot_payloads (interest);\nCREATE INDEX IF NOT EXISTS honeypot_payloads_pending_idx ON honeypot_payloads (weight DESC) WHERE analysed_at IS NULL;\nCREATE INDEX IF NOT EXISTS honeypot_payloads_sig_idx ON honeypot_payloads (sig_hash);\nCREATE INDEX IF NOT EXISTS honeypot_payloads_unsigned_idx ON honeypot_payloads (payload_hash) WHERE sig_hash IS NULL;\nCREATE TABLE IF NOT EXISTS honeypot_signatures (\n  sig_hash text PRIMARY KEY,\n  sig_text text,\n  first_seen timestamptz,\n  last_seen timestamptz,\n  payload_count int NOT NULL DEFAULT 0,\n  event_count bigint NOT NULL DEFAULT 0,\n  sample_payload_hash text,\n  technique text,\n  alert_count int NOT NULL DEFAULT 0,\n  first_alerted timestamptz,\n  last_alerted timestamptz\n);\nCREATE TABLE IF NOT EXISTS honeypot_iocs (\n  ioc text PRIMARY KEY,\n  first_seen timestamptz NOT NULL DEFAULT now(),\n  last_seen timestamptz NOT NULL DEFAULT now(),\n  payload_count int NOT NULL DEFAULT 0,\n  first_payload text,\n  alerted_at timestamptz\n);",
+        "options": {}
+      },
+      "id": "3509b407-3db7-4142-bf94-1d6cf958ba34",
+      "name": "Ensure Schema",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        224,
+        304
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "31f6ff73-d7f0-4ecd-8438-ca64f5e80d16",
+      "name": "Run Now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_wazuh_state",
+          "cachedResultName": "wazuh_state"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "key",
+              "keyValue": "hp_cursor"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "0c719894-334a-4fca-a1ae-6d9e8d44e954",
+      "name": "Get HP Cursor",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        448,
+        304
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $input.all().map((i) => i.json).find((r) => r && r.key === 'hp_cursor');\nlet prev = {};\ntry { prev = row ? JSON.parse(row.value || '{}') : {}; } catch (e) { prev = {}; }\nconst since = prev.ts || new Date(Date.now() - 24 * 3600000).toISOString();\nconst mustNot = (prev.ids && prev.ids.length) ? [{ ids: { values: prev.ids } }] : [];\nconst body = {\n  size: 500,\n  sort: [{ timestamp: { order: 'asc' } }],\n  query: { bool: { filter: [{ terms: { 'rule.groups': ['honeypot'] } }, { range: { timestamp: { gte: since } } }], should: [{ exists: { field: 'data.detections' } }, { exists: { field: 'data.body' } }, { exists: { field: 'data.decoded_layers' } }, { exists: { field: 'data.artifacts' } }, { exists: { field: 'data.http.query' } }], minimum_should_match: 1, must_not: mustNot } },\n  _source: ['timestamp', 'rule.id', 'rule.description', 'agent.name', 'data', 'location']\n};\nreturn [{ json: { body: body, since: since, prev: prev } }];\n"
+      },
+      "id": "e56dd706-2f1a-493f-a088-0acf16abdf11",
+      "name": "Build Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://WAZUH_INDEXER:9200/wazuh-alerts-4.x-*/_search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "timeout": 30000
+        }
+      },
+      "id": "713b024b-2dca-4062-8514-ca1412a17abc",
+      "name": "Search Honeypot Events",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        304
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "Wazuh Opensearch"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const hits = (($input.first().json.hits || {}).hits) || [];\nconst SKIP_HEADERS = ['host', 'cookie', 'content-length', 'accept', 'accept-encoding', 'accept-language', 'connection', 'x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host', 'x-forwarded-port', 'x-real-ip', 'x-envoy-external-address', 'x-request-id', 'x-amzn-trace-id', 'cache-control', 'pragma', 'upgrade-insecure-requests', 'user-agent', 'content-type', 'referer', 'origin', 'te', 'priority', 'dnt'];\nconst uniq = (a) => Array.from(new Set(a.filter(Boolean)));\nconst iso = (t) => { const d = new Date(String(t || '').replace(/([+-][0-9]{2})([0-9]{2})$/, '$1:$2')); return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString(); };\nconst validIp = (ip) => ip.split('.').every((o) => Number(o) >= 0 && Number(o) <= 255);\nconst decodeB64 = (b) => {\n  try {\n    const s = Buffer.from(b, 'base64').toString('utf8');\n    const printable = s.replace(/[^ -~]/g, '').length / Math.max(1, s.length);\n    return printable > 0.9 && s.length > 8 ? s.slice(0, 1500) : null;\n  } catch (e) { return null; }\n};\nconst groups = {};\nfor (const h of hits) {\n  const s = h._source || {};\n  const d = s.data || {};\n  const http = d.http || {};\n  const method = String(http.method || '');\n  const path = String(http.path || '').slice(0, 1000);\n  const query = String(http.query || '').slice(0, 2000);\n  const headers = [].concat(http.headers || []).filter((x) => x && x.name && SKIP_HEADERS.indexOf(String(x.name).toLowerCase()) < 0).map((x) => ({ name: String(x.name).toLowerCase(), value: String(x.value || '').slice(0, 2000) }));\n  const body = String(d.body || '').slice(0, 8000);\n  const dets = [].concat(d.detections || []).filter((x) => x && typeof x === 'object').map((x) => ({ id: x.id || '', name: x.name || '', severity: x.severity || '', location: x.location || '', evidence: String(x.evidence || '').slice(0, 500), cves: [].concat(x.cves || []) }));\n  const decoded = [].concat(d.decoded_layers || []).concat([].concat(d.artifacts || []).map((a) => ({ artifact: a })));\n  const interesting = dets.length || body.trim() || decoded.length || query;\n  if (!interesting) continue;\n  const srcIp = String(d.src_ip || d.srcip || '');\n  const text = [query, headers.map((x) => x.value).join(' '), body, JSON.stringify(decoded), dets.map((x) => x.evidence).join(' ')].join(' ');\n  let all = text;\n  try { all += ' ' + decodeURIComponent(text.replace(/[+]/g, ' ')); } catch (e) { all += ''; }\n  const b64 = uniq((all.match(/[A-Za-z0-9+/]{40,}={0,2}/g) || []).slice(0, 8).map(decodeB64));\n  all += ' ' + b64.join(' ');\n  const urls = uniq((all.match(/(?:https?|ftp|tftp|ldaps?|rmi|dns|gopher|iiop|corba):[/][/][^ \"'<>|;(){}]+/gi) || []).map((u) => u.slice(0, 300))).slice(0, 20);\n  const hosts = uniq(urls.map((u) => { try { return new URL(u).hostname; } catch (e) { return ''; } }));\n  const ips = uniq((all.match(/[0-9]{1,3}(?:[.][0-9]{1,3}){3}/g) || []).filter((ip) => validIp(ip) && ip !== srcIp && ip.indexOf('0.') !== 0)).slice(0, 20);\n  const commands = uniq((all.match(/(?:curl|wget|busybox|tftp|chmod|bash -c|sh -c|powershell|certutil|bitsadmin|nc -e|ncat|python[0-9.]* -c|perl -e|base64 -d|echo [A-Za-z0-9+/=]{20,})[^;|&\"'<>]{0,160}/gi) || []).map((c) => c.trim())).slice(0, 15);\n  const iocs = { urls: urls, hosts: hosts.filter((x) => !/^[0-9.]+$/.test(x)), ips: ips, commands: commands, base64: b64.slice(0, 5) };\n  const weight = dets.length * 2 + (urls.length ? 6 : 0) + (commands.length ? 6 : 0) + (b64.length ? 3 : 0) + (decoded.length ? 2 : 0) + (body.trim() ? 1 : 0);\n  const canonical = [method, path, '?' + query, headers.map((x) => x.name + ': ' + x.value).sort().join(' | '), body].join(' || ');\n  const ts = iso(s.timestamp);\n  const sensor = String(d.sensor_host || (s.agent || {}).name || '');\n  const g = groups[canonical];\n  if (g) {\n    g.count += 1;\n    if (ts < g.ts) g.ts = ts;\n    g.src_ips = uniq(g.src_ips.concat([srcIp])).slice(0, 200);\n    g.sensors = uniq(g.sensors.concat([sensor]));\n  } else {\n    groups[canonical] = {\n      canonical: canonical, ts: ts, count: 1, src_ips: uniq([srcIp]), sensors: uniq([sensor]),\n      method: method, path: path, query: query, headers: headers, body: body, detections: dets,\n      cves: uniq([].concat(...dets.map((x) => x.cves)).map((c) => String(c).toUpperCase())),\n      categories: uniq([].concat(d.categories || []).map(String)), decoded: decoded, static_iocs: iocs,\n      weight: weight, sample_alert_id: h._id\n    };\n  }\n}\nconst rows = Object.values(groups);\nif (!rows.length) return [];\nreturn [{ json: { n: rows.length, events: hits.length, rows: JSON.stringify(rows) } }];\n"
+      },
+      "id": "b0ace2c8-049a-4b2b-8d55-3bfe14591da2",
+      "name": "Extract Payloads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        208
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO honeypot_payloads AS p (payload_hash, first_seen, last_seen, count, src_ips, sensors, method, path, query, headers, body, detections, cves, categories, decoded, static_iocs, weight, sample_alert_id)\nSELECT md5(r.canonical), r.ts, r.ts, r.count, COALESCE(r.src_ips, '{}'), COALESCE(r.sensors, '{}'), r.method, r.path, r.query, r.headers, r.body, r.detections, r.cves, r.categories, r.decoded, r.static_iocs, r.weight, r.sample_alert_id\nFROM jsonb_to_recordset($1::jsonb) AS r(canonical text, ts timestamptz, count int, src_ips text[], sensors text[], method text, path text, query text, headers jsonb, body text, detections jsonb, cves text[], categories text[], decoded jsonb, static_iocs jsonb, weight int, sample_alert_id text)\nON CONFLICT (payload_hash) DO UPDATE SET\n  first_seen = LEAST(p.first_seen, EXCLUDED.first_seen),\n  last_seen = GREATEST(p.last_seen, EXCLUDED.last_seen),\n  count = p.count + EXCLUDED.count,\n  src_ips = (SELECT COALESCE(array_agg(x), '{}') FROM (SELECT DISTINCT x FROM unnest(p.src_ips || EXCLUDED.src_ips) AS x LIMIT 500) s),\n  sensors = (SELECT COALESCE(array_agg(x), '{}') FROM (SELECT DISTINCT x FROM unnest(p.sensors || EXCLUDED.sensors) AS x) s)\nRETURNING payload_hash;",
+        "options": {
+          "queryReplacement": "={{ [$json.rows || '[]'] }}"
+        }
+      },
+      "id": "f58fa825-a74d-41e4-9573-3cd1212bb345",
+      "name": "Upsert Payloads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1328,
+        208
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT payload_hash, sig_hash, ioc_keys, first_seen, last_seen, count, src_ips[1:5] AS src_ips, cardinality(src_ips) AS src_ip_count, sensors, method, path, query, headers, left(body, 4000) AS body, detections, cves, categories, decoded, static_iocs, weight, sample_alert_id\nFROM honeypot_payloads WHERE analysed_at IS NULL ORDER BY weight DESC, last_seen DESC LIMIT 8;",
+        "options": {}
+      },
+      "id": "d5ab46fe-21f9-49b4-9a83-1c0b76563054",
+      "name": "Get Unanalysed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2672,
+        208
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const p = $json;\nconst SYS = 'You are a malware and exploit analyst reviewing a payload captured by a web honeypot that emulates common web applications. Every request is hostile or a scanner; your job is to say what it does and whether it is worth a human looking at. ' +\n  'Respond with JSON only, exactly these keys: {\"summary\": one sentence, \"technique\": e.g. SpEL injection, command injection, path traversal, XXE, deserialisation, SSRF, file upload, credential stuffing, recon, \"target\": product or component targeted, \"cves\": array of CVE IDs only if confident else [], \"stage\": one of recon, exploit, dropper, c2, persistence, unknown, \"malware_family\": name or empty string, \"decoded\": the deobfuscated core of the payload in at most 600 characters, \"iocs\": {\"urls\": [], \"ips\": [], \"domains\": [], \"commands\": []}, \"interest\": integer 0-100 where 0 is generic mass-scanner noise seen everywhere and 100 is novel, targeted at the emulated application, or carrying a second stage or callback, \"why\": one sentence justifying the interest score, \"detection_idea\": one sentence on how to detect or block this}. ' +\n  'Decode base64, URL encoding, hex and nested shell. Do not invent IOCs that are not present in the payload.';\nconst input = {\n  request: { method: p.method, path: p.path, query: p.query, headers: p.headers, body: p.body },\n  honeypot_detections: p.detections, cves_flagged: p.cves, categories: p.categories,\n  decoded_layers: p.decoded, static_extraction: p.static_iocs,\n  seen: { count: p.count, distinct_source_ips: p.src_ip_count, sample_ips: p.src_ips, first_seen: p.first_seen, sensors: p.sensors }\n};\nlet user = JSON.stringify(input);\nif (user.length > 12000) user = user.slice(0, 12000);\nreturn { json: Object.assign({}, p, {\n  ollama_body: { model: 'OLLAMA_MODEL', stream: false, think: false, format: 'json', keep_alive: '15m', options: { temperature: 0.1, num_predict: 900 }, messages: [{ role: 'system', content: SYS }, { role: 'user', content: user }] }\n}) };\n"
+      },
+      "id": "ff0ebaad-13ee-4c96-91e4-3af98d9a742d",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2896,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://OLLAMA_HOST:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.ollama_body) }}",
+        "options": {
+          "timeout": 150000
+        }
+      },
+      "id": "9186cb36-087b-44b8-94ed-678ce94845be",
+      "name": "LLM Analyse",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3120,
+        208
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $('Build Prompt').all().map((i) => i.json);\nconst res = $input.all().map((i) => i.json);\nconst BENIGN = /(^|[.])(w3[.]org|xmlsoap[.]org|microsoft[.]com|apache[.]org|oasis-open[.]org|xml[.]org|openxmlformats[.]org|purl[.]org|android[.]com|example[.](com|org|net))$/i;\nconst realUrl = (u) => { try { return !BENIGN.test(new URL(u).hostname); } catch (e) { return true; } };\nconst out = [];\nsrc.forEach((p, n) => {\n  let a = null;\n  try { a = JSON.parse((res[n] && res[n].message && res[n].message.content) || ''); } catch (e) { a = null; }\n  if (!a || typeof a !== 'object') return;\n  const interest = Math.max(0, Math.min(100, Math.round(Number(a.interest) || 0)));\n  const s = p.static_iocs || {};\n  const stage = String(a.stage || 'unknown').toLowerCase();\n  const callback = (s.urls || []).filter(realUrl).length > 0 || (s.commands || []).length > 0;\n  const fresh = Date.now() - new Date(p.last_seen || 0).getTime() < 6 * 3600000;\n  const notify = fresh && (interest >= 60 || callback || ['dropper', 'c2', 'persistence'].indexOf(stage) >= 0);\n  const analysis = {\n    summary: String(a.summary || '').slice(0, 400), technique: String(a.technique || '').slice(0, 120), target: String(a.target || '').slice(0, 160),\n    cves: [].concat(a.cves || []).map(String).slice(0, 10), stage: stage, malware_family: String(a.malware_family || '').slice(0, 80),\n    decoded: String(a.decoded || '').slice(0, 800), iocs: a.iocs || {}, why: String(a.why || '').slice(0, 300), detection_idea: String(a.detection_idea || '').slice(0, 300),\n    model: 'OLLAMA_MODEL'\n  };\n  out.push({ json: Object.assign({}, p, { analysis: analysis, interest: interest, notify: notify }) });\n});\nreturn out;"
+      },
+      "id": "1bac1e09-5476-4789-8b73-ab92bdd68b1e",
+      "name": "Parse Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3344,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.notify }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "db1c2c60-768f-4d3d-9fa1-038df35b9c76",
+      "name": "Worth Alerting?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4016,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const build = (p) => {\nconst a = p.analysis || {};\nconst s = p.static_iocs || {};\nconst sn = p.seen || {};\nconst NL = String.fromCharCode(10);\nconst TICKS = String.fromCharCode(96, 96, 96);\nconst li = (arr, n) => [].concat(arr || []).slice(0, n || 8).join(NL);\nconst colour = p.interest >= 80 ? 0xE74C3C : p.interest >= 60 ? 0xE67E22 : 0xF1C40F;\nconst req = (p.method + ' ' + p.path + (p.query ? '?' + p.query : '')).slice(0, 300);\nconst iocLines = [];\nconst urls = [].concat(s.urls || [], (a.iocs || {}).urls || []);\nif (urls.length) iocLines.push('URLs: ' + Array.from(new Set(urls)).slice(0, 6).join(', '));\nconst ips = [].concat(s.ips || [], (a.iocs || {}).ips || []);\nif (ips.length) iocLines.push('IPs: ' + Array.from(new Set(ips)).slice(0, 8).join(', '));\nconst doms = [].concat(s.hosts || [], (a.iocs || {}).domains || []);\nif (doms.length) iocLines.push('Domains: ' + Array.from(new Set(doms)).slice(0, 8).join(', '));\nconst cmds = [].concat(s.commands || [], (a.iocs || {}).commands || []);\nif (cmds.length) iocLines.push('Commands: ' + Array.from(new Set(cmds)).slice(0, 4).join(' ; '));\nconst f = [\n  { name: 'Interest', value: String(p.interest) + '/100', inline: true },\n  { name: 'Stage', value: a.stage || '-', inline: true },\n  { name: 'Seen', value: p.count + 'x from ' + (p.src_ip_count || 0) + ' IPs', inline: true },\n  { name: 'Request', value: TICKS + req + TICKS, inline: false }\n];\nif (sn.reason) f.push({ name: 'Why alerted', value: (sn.reason + ((sn.new_iocs || []).length ? ': ' + sn.new_iocs.slice(0, 6).join(', ') : '')).slice(0, 1024), inline: false });\nif (sn.variants > 1 || sn.alert_count) f.push({ name: 'Similar seen', value: (sn.variants + ' variants, ' + sn.events + ' events since ' + String(sn.sig_first_seen || '').slice(0, 10) + (sn.last_alerted ? ', last alerted ' + String(sn.last_alerted).slice(0, 16).replace('T', ' ') : ', never alerted')).slice(0, 1024), inline: false });\nconst dets = [].concat(p.detections || []).map((x) => x.id + ' ' + x.name).filter((x) => x.trim());\nif (dets.length) f.push({ name: 'Honeypot detections', value: li(dets, 6).slice(0, 1024), inline: false });\nconst cves = Array.from(new Set([].concat(p.cves || [], a.cves || [])));\nif (cves.length) f.push({ name: 'CVEs', value: cves.join(', ').slice(0, 1024), inline: true });\nif (a.malware_family) f.push({ name: 'Family', value: a.malware_family, inline: true });\nif (iocLines.length) f.push({ name: 'IOCs', value: iocLines.join(NL).slice(0, 1024), inline: false });\nif (a.decoded) f.push({ name: 'Decoded', value: (TICKS + a.decoded.slice(0, 900) + TICKS), inline: false });\nif (a.why) f.push({ name: 'Why', value: a.why.slice(0, 1024), inline: false });\nif (a.detection_idea) f.push({ name: 'Detection idea', value: a.detection_idea.slice(0, 1024), inline: false });\nf.push({ name: 'Sample IPs', value: li(p.src_ips, 5) || '-', inline: true });\nreturn { embed: {\n  title: ('Honeypot payload: ' + (a.technique || 'unknown') + (a.target ? ' -> ' + a.target : '')).slice(0, 250),\n  description: (a.summary || '').slice(0, 1000),\n  color: colour, fields: f.slice(0, 25),\n  footer: { text: 'Honeypot Payloads | ' + p.payload_hash + ' | sig ' + String(sn.sig_hash || '-').slice(0, 12) + ' | ' + (p.sample_alert_id || '') },\n  timestamp: new Date(p.first_seen || Date.now()).toISOString()\n} };\n};\nconst items = $input.all().map((i) => i.json);\nconst NL2 = String.fromCharCode(10);\nif (items.length > 3) {\n  items.sort((x, y) => y.interest - x.interest);\n  const lines = items.slice(0, 20).map((p) => { const a = p.analysis || {}; const sn = p.seen || {}; return '- **' + p.interest + '** ' + (a.stage || '?') + ' | ' + (a.technique || '?') + ' | ' + (p.method + ' ' + p.path).slice(0, 80) + ' | ' + (sn.reason || '') + ' | ' + String(a.summary || '').slice(0, 120); });\n  return [{ json: { embed: { title: 'Honeypot payloads: ' + items.length + ' new interesting', color: 0xE67E22, description: lines.join(NL2).slice(0, 4000), footer: { text: 'Honeypot Payloads | full detail in Postgres honeypot_payloads' }, timestamp: new Date().toISOString() } } }].concat(items.slice(0, 1).map((p) => ({ json: build(p) })));\n}\nreturn items.map((p) => ({ json: build(p) }));",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "da42b96c-e800-4d17-9082-b625e29871dc",
+      "name": "Payload Embeds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4240,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "channelId": {
+          "__rl": true,
+          "cachedResultName": "honeypot-payloads",
+          "mode": "list",
+          "value": "DISCORD_HONEYPOT_CHANNEL_ID"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "id": "29468e51-b015-48e5-b10f-eba8b90af33a",
+      "name": "Post Payload",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        4464,
+        112
+      ],
+      "webhookId": "6af7bbdf-46b2-47c9-b15b-339ad19a5e61",
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map((i) => ({ payload_hash: i.json.payload_hash, sig_hash: i.json.sig_hash || null, ioc_keys: i.json.ioc_keys || [], analysis: i.json.analysis, interest: i.json.interest, notify: i.json.notify === true }));\nreturn [{ json: { n: rows.length, rows: JSON.stringify(rows) } }];"
+      },
+      "id": "0d4dde9e-a69d-48a8-8958-fe406a0a209f",
+      "name": "Analysis Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4016,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH r AS (\n  SELECT * FROM jsonb_to_recordset($1::jsonb) AS r(payload_hash text, sig_hash text, ioc_keys text[], analysis jsonb, interest int, notify boolean)\n), up AS (\n  UPDATE honeypot_payloads AS p SET analysis = r.analysis, interest = r.interest, analysed_at = now(), notified = p.notified OR r.notify\n  FROM r WHERE p.payload_hash = r.payload_hash RETURNING p.payload_hash\n), sg AS (\n  UPDATE honeypot_signatures g SET alert_count = g.alert_count + x.n, first_alerted = COALESCE(g.first_alerted, now()), last_alerted = now(), technique = COALESCE(x.t, g.technique)\n  FROM (SELECT sig_hash, count(*) AS n, max(analysis->>'technique') AS t FROM r WHERE notify AND sig_hash IS NOT NULL GROUP BY sig_hash) x\n  WHERE g.sig_hash = x.sig_hash RETURNING g.sig_hash\n), io AS (\n  INSERT INTO honeypot_iocs (ioc, first_seen, last_seen, payload_count, first_payload, alerted_at)\n  SELECT k, now(), now(), count(*), min(r.payload_hash), CASE WHEN bool_or(r.notify) THEN now() END\n  FROM r, unnest(r.ioc_keys) AS k WHERE r.analysis->>'skipped' IS NULL GROUP BY k\n  ON CONFLICT (ioc) DO UPDATE SET last_seen = now(), payload_count = honeypot_iocs.payload_count + EXCLUDED.payload_count, alerted_at = COALESCE(honeypot_iocs.alerted_at, EXCLUDED.alerted_at)\n  RETURNING ioc\n)\nSELECT (SELECT count(*) FROM up) AS updated, (SELECT count(*) FROM sg) AS signatures_alerted, (SELECT count(*) FROM io) AS iocs;",
+        "options": {
+          "queryReplacement": "={{ [$json.rows] }}"
+        }
+      },
+      "id": "5199cfc5-caeb-47d5-9697-c5470a33695c",
+      "name": "Save Analysis",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        4240,
+        320
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const q = $('Build Query').first().json;\nconst hits = (($input.first().json.hits || {}).hits) || [];\nlet st = Object.assign({}, q.prev || {});\nif (hits.length) {\n  const last = hits[hits.length - 1]._source.timestamp;\n  const ids = hits.filter((h) => h._source.timestamp === last).map((h) => h._id);\n  const carry = last === st.ts ? (st.ids || []) : [];\n  st = { ts: last, ids: Array.from(new Set(carry.concat(ids))).slice(-500) };\n} else if (!st.ts) {\n  st = { ts: q.since, ids: [] };\n}\nreturn [{ json: { key: 'hp_cursor', value: JSON.stringify(st) } }];\n"
+      },
+      "id": "e3f9ed56-2b5a-4350-a162-5a1c7cc07b97",
+      "name": "Next Cursor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1376,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_wazuh_state",
+          "cachedResultName": "wazuh_state"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "key",
+              "keyValue": "hp_cursor"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "4a252da8-16ec-466e-9599-84ab9d40ca15",
+      "name": "Save HP Cursor",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1600,
+        512
+      ]
+    },
+    {
+      "id": "04e66eb1-cc24-4b96-8216-99c808a32fef",
+      "name": "Unsigned Payloads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1776,
+        208
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "options": {},
+        "query": "SELECT payload_hash, method, path, query, headers, left(body, 8000) AS body, detections, static_iocs\nFROM honeypot_payloads WHERE sig_hash IS NULL OR sig_text NOT LIKE 'v3 ||%' LIMIT 5000;"
+      },
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "cc3ca146-9b70-47ee-ba1b-7f1a1458f320",
+      "name": "Compute Signatures",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        208
+      ],
+      "parameters": {
+        "jsCode": "const rows = $input.all().map((i) => i.json).filter((r) => r && r.payload_hash);\nconst OAST_RE = /([a-z0-9-]+[.])+(oast[.](fun|pro|live|site|online|me)|interact[.]sh|oastify[.]com|burpcollaborator[.]net|dnslog[.]cn|ceye[.]io|requestrepo[.]com|pipedream[.]net|webhook[.]site|canarytokens[.]com)/g;\nconst OAST_TAIL = /(oast[.](fun|pro|live|site|online|me)|interact[.]sh|oastify[.]com|burpcollaborator[.]net|dnslog[.]cn|ceye[.]io|requestrepo[.]com|pipedream[.]net|webhook[.]site|canarytokens[.]com)$/;\nconst BENIGN = /(^|[.])(w3[.]org|xmlsoap[.]org|microsoft[.]com|apache[.]org|oasis-open[.]org|xml[.]org|openxmlformats[.]org|purl[.]org|android[.]com|example[.](com|org|net))$/i;\nconst SLD = ['co', 'com', 'org', 'net', 'gov', 'ac', 'edu', 'ne', 'or'];\nconst regDomain = (h) => {\n  const d = String(h || '').toLowerCase().replace(/[.]$/, '');\n  const m = d.match(OAST_TAIL);\n  if (m) return m[1];\n  const parts = d.split('.').filter(Boolean);\n  if (parts.length <= 2) return parts.join('.');\n  const n = (parts[parts.length - 1].length === 2 && SLD.indexOf(parts[parts.length - 2]) >= 0) ? 3 : 2;\n  return parts.slice(-n).join('.');\n};\nconst isB64 = (t) => /[A-Z]/.test(t) && /[a-z]/.test(t) && /[0-9]/.test(t);\nconst norm = (s, keep) => {\n  let x = String(s || '').replace(/--+[A-Za-z0-9]{8,}/g, '--<bnd>');\n  if (!keep) x = x.replace(/[A-Za-z0-9+/]{32,}={0,2}/g, (t) => isB64(t) ? '<blob>' : t);\n  return x.toLowerCase()\n    .replace(/eyj[a-z0-9_-]+[.][a-z0-9_-]+[.][a-z0-9_-]*/g, '<jwt>')\n    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, '<uuid>')\n    .replace(/[0-9]{4}-[0-9]{2}-[0-9]{2}[t ][0-9]{2}:[0-9]{2}(:[0-9]{2})?([.][0-9]+)?(z|[+-][0-9]{2}:?[0-9]{2})?/g, '<ts>')\n    .replace(OAST_RE, '<oast>')\n    .replace(/[0-9]{1,3}([.][0-9]{1,3}){3}/g, '<ip>')\n    .replace(/[0-9a-f]{12,}/g, '<hex>')\n    .replace(/[0-9]+/g, '<n>')\n    .replace(/[^!-~]+/g, ' ').trim();\n};\nconst PLAIN = /^[A-Za-z0-9 ._@:-]*$/;\nconst val = (v) => {\n  if (v === null || v === undefined) return '<null>';\n  if (typeof v === 'number') return '<n>';\n  if (typeof v === 'boolean') return String(v);\n  const s = String(v);\n  if (!s) return '';\n  if (PLAIN.test(s)) return s.length <= 3 ? norm(s) : '<w>';\n  return norm(s).slice(0, 300);\n};\nconst shape = (o, d) => {\n  if (d > 6) return '<deep>';\n  if (Array.isArray(o)) return '[' + Array.from(new Set(o.slice(0, 20).map((x) => shape(x, d + 1)))).sort().join(',') + ']';\n  if (o && typeof o === 'object') return '{' + Object.keys(o).sort().map((k) => norm(k, true) + ':' + shape(o[k], d + 1)).join(',') + '}';\n  return val(o);\n};\nconst dec = (s) => { try { return decodeURIComponent(String(s).replace(/[+]/g, ' ')); } catch (e) { return String(s); } };\nconst form = (s) => {\n  const pairs = String(s || '').split('&').filter(Boolean).map((kv) => {\n    const i = kv.indexOf('=');\n    const k = dec(i < 0 ? kv : kv.slice(0, i));\n    const v = dec(i < 0 ? '' : kv.slice(i + 1));\n    return norm(k, true) + '=' + val(v);\n  });\n  return Array.from(new Set(pairs)).sort().join('&');\n};\nconst bodyShape = (b) => {\n  const t = String(b || '').trim();\n  if (!t) return '';\n  if (t[0] === '{' || t[0] === '[') { try { return 'json:' + shape(JSON.parse(t), 0); } catch (e) { /* not json */ } }\n  if (t[0] === '<') return 'xml:' + norm(t.replace(/>[A-Za-z0-9 ._@:-]+</g, '><w><').replace(/=\"[A-Za-z0-9 ._@:-]+\"/g, '=\"<w>\"')).slice(0, 3000);\n  if (/^[^ =&]+=[^ ]*(&[^ =&]+=[^ ]*)*$/.test(t)) return 'form:' + form(t);\n  return 'raw:' + norm(t).slice(0, 3000);\n};\nconst out = rows.map((p) => {\n  const hdrs = Array.from(new Set([].concat(p.headers || []).map((h) => norm(h.name, true) + ':' + norm(h.value).slice(0, 200)))).sort().join('|');\n  const dets = Array.from(new Set([].concat(p.detections || []).map((x) => String((x && x.id) || '').toUpperCase()).filter(Boolean))).sort();\n  const sig = ['v3', 'm:' + String(p.method || '').toUpperCase(), 'p:' + norm(p.path, true), 'q:' + form(p.query), 'h:' + hdrs, 'b:' + bodyShape(p.body)].join(' || ').slice(0, 8000);\n  const s = p.static_iocs || {};\n  const hosts = [].concat(s.hosts || []);\n  [].concat(s.urls || []).forEach((u) => { try { hosts.push(new URL(u).hostname); } catch (e) { /* bad url */ } });\n  const keys = [];\n  hosts.forEach((h) => { if (/^[0-9.]+$/.test(h)) keys.push('ip:' + h); else if (h && !BENIGN.test(h)) keys.push('dom:' + regDomain(h)); });\n  [].concat(s.ips || []).forEach((ip) => keys.push('ip:' + ip));\n  dets.forEach((id) => keys.push('det:' + id));\n  return { payload_hash: p.payload_hash, sig_text: sig, ioc_keys: Array.from(new Set(keys)).slice(0, 50) };\n});\nreturn [{ json: { n: out.length, rows: JSON.stringify(out) } }];",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "99519ea4-a9d8-4b41-b21b-e779945c12af",
+      "name": "Save Signatures",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2224,
+        208
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "options": {
+          "queryReplacement": "={{ [$json.rows] }}"
+        },
+        "query": "UPDATE honeypot_payloads AS p SET sig_text = r.sig_text, sig_hash = md5(r.sig_text), ioc_keys = COALESCE(r.ioc_keys, '{}')\nFROM jsonb_to_recordset($1::jsonb) AS r(payload_hash text, sig_text text, ioc_keys text[])\nWHERE p.payload_hash = r.payload_hash\nRETURNING p.payload_hash;"
+      },
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "a1798b02-9bbd-405e-ab30-eab9a8d7e86a",
+      "name": "Refresh Signatures",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2448,
+        208
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "options": {},
+        "query": "DELETE FROM honeypot_signatures g WHERE NOT EXISTS (SELECT 1 FROM honeypot_payloads p WHERE p.sig_hash = g.sig_hash);\nINSERT INTO honeypot_signatures AS g (sig_hash, sig_text, first_seen, last_seen, payload_count, event_count, sample_payload_hash)\nSELECT p.sig_hash, min(p.sig_text), min(p.first_seen), max(p.last_seen), count(*), sum(p.count), (array_agg(p.payload_hash ORDER BY p.weight DESC NULLS LAST, p.first_seen))[1]\nFROM honeypot_payloads p\nWHERE p.sig_hash IN (SELECT DISTINCT x.sig_hash FROM honeypot_payloads x WHERE x.sig_hash IS NOT NULL AND (x.last_seen > now() - interval '2 days' OR NOT EXISTS (SELECT 1 FROM honeypot_signatures y WHERE y.sig_hash = x.sig_hash)))\nGROUP BY p.sig_hash\nON CONFLICT (sig_hash) DO UPDATE SET first_seen = EXCLUDED.first_seen, last_seen = EXCLUDED.last_seen, payload_count = EXCLUDED.payload_count, event_count = EXCLUDED.event_count, sample_payload_hash = EXCLUDED.sample_payload_hash;\nUPDATE honeypot_signatures g SET alert_count = x.n, first_alerted = x.f, last_alerted = x.l, technique = COALESCE(g.technique, x.t)\nFROM (SELECT sig_hash, count(*) AS n, min(analysed_at) AS f, max(analysed_at) AS l, max(analysis->>'technique') AS t FROM honeypot_payloads WHERE notified AND sig_hash IS NOT NULL GROUP BY sig_hash) x\nWHERE g.sig_hash = x.sig_hash AND g.alert_count = 0;\nINSERT INTO honeypot_iocs (ioc, first_seen, last_seen, payload_count, first_payload, alerted_at)\nSELECT k, min(p.first_seen), max(p.last_seen), count(*), min(p.payload_hash), max(CASE WHEN p.notified THEN p.analysed_at END)\nFROM honeypot_payloads p, unnest(p.ioc_keys) AS k\nWHERE p.analysed_at IS NOT NULL AND p.analysis->>'skipped' IS NULL\nGROUP BY k\nON CONFLICT (ioc) DO NOTHING;\nUPDATE honeypot_payloads p SET analysis = s.analysis || jsonb_build_object('inherited_from', s.payload_hash, 'sig_hash', p.sig_hash), interest = s.interest, analysed_at = now()\nFROM honeypot_signatures g, honeypot_payloads s\nWHERE p.analysed_at IS NULL AND p.sig_hash IS NOT NULL AND g.sig_hash = p.sig_hash\n  AND s.payload_hash = (SELECT x.payload_hash FROM honeypot_payloads x WHERE x.sig_hash = p.sig_hash AND x.analysed_at IS NOT NULL AND x.analysis->>'inherited_from' IS NULL AND x.analysis->>'skipped' IS NULL ORDER BY x.interest DESC NULLS LAST LIMIT 1)\n  AND (g.alert_count > 0 OR COALESCE(s.interest, 0) < 40)\n  AND NOT EXISTS (SELECT 1 FROM unnest(p.ioc_keys) AS k WHERE NOT EXISTS (SELECT 1 FROM honeypot_iocs i WHERE i.ioc = k));\nSELECT (SELECT count(*) FROM honeypot_signatures) AS signatures, (SELECT count(*) FROM honeypot_payloads WHERE analysed_at IS NULL) AS pending, (SELECT count(*) FROM honeypot_payloads WHERE analysis->>'inherited_from' IS NOT NULL) AS inherited;"
+      },
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "54ad0aef-a5de-4fa2-bec7-758da4c425d6",
+      "name": "Seen Lookup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        3568,
+        208
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify({ sigs: $('Parse Analysis').all().map((i) => i.json.sig_hash).filter(Boolean), iocs: [].concat(...$('Parse Analysis').all().map((i) => i.json.ioc_keys || [])) })] }}"
+        },
+        "query": "SELECT\n  (SELECT COALESCE(jsonb_object_agg(g.sig_hash, jsonb_build_object('payload_count', g.payload_count, 'event_count', g.event_count, 'first_seen', g.first_seen, 'alert_count', g.alert_count, 'last_alerted', g.last_alerted)), '{}'::jsonb)\n     FROM honeypot_signatures g WHERE g.sig_hash IN (SELECT jsonb_array_elements_text($1::jsonb->'sigs'))) AS sigs,\n  (SELECT COALESCE(jsonb_object_agg(i.ioc, jsonb_build_object('alerted_at', i.alerted_at, 'payload_count', i.payload_count)), '{}'::jsonb)\n     FROM honeypot_iocs i WHERE i.ioc IN (SELECT jsonb_array_elements_text($1::jsonb->'iocs'))) AS iocs;"
+      },
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "5125f1dc-5e62-4f38-af6c-8fa42ea9c0cd",
+      "name": "Apply Seen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3792,
+        208
+      ],
+      "parameters": {
+        "jsCode": "const REALERT_DAYS = 30;\nconst items = $('Parse Analysis').all().map((i) => i.json);\nconst look = $input.first().json || {};\nconst sigs = look.sigs || {};\nconst iocs = look.iocs || {};\nconst now = Date.now();\nconst alertedSigs = {};\nconst alertedIocs = {};\nconst order = items.map((p, n) => n).sort((a, b) => (items[b].interest || 0) - (items[a].interest || 0));\nfor (const n of order) {\n  const p = items[n];\n  const g = sigs[p.sig_hash] || null;\n  const keys = [].concat(p.ioc_keys || []);\n  const newIocs = keys.filter((k) => !(iocs[k] && iocs[k].alerted_at) && !alertedIocs[k]);\n  const lastAlerted = g && g.last_alerted ? new Date(g.last_alerted).getTime() : 0;\n  const recent = lastAlerted > 0 && now - lastAlerted < REALERT_DAYS * 86400000;\n  const seen = { sig_hash: p.sig_hash || null, variants: g ? Number(g.payload_count) || 0 : 0, events: g ? Number(g.event_count) || 0 : 0, sig_first_seen: g ? g.first_seen : null, alert_count: g ? Number(g.alert_count) || 0 : 0, last_alerted: g ? g.last_alerted : null, new_iocs: newIocs.slice(0, 20) };\n  let notify = p.notify === true;\n  if (notify && !newIocs.length) {\n    if (recent) { notify = false; seen.suppressed = 'signature already alerted ' + new Date(lastAlerted).toISOString().slice(0, 16); }\n    else if (p.sig_hash && alertedSigs[p.sig_hash]) { notify = false; seen.suppressed = 'same signature as ' + alertedSigs[p.sig_hash] + ' in this batch'; }\n  }\n  if (notify) {\n    if (p.sig_hash) alertedSigs[p.sig_hash] = p.payload_hash;\n    keys.forEach((k) => { alertedIocs[k] = true; });\n    seen.reason = !lastAlerted ? 'new signature' : newIocs.length ? 'known signature, new indicators' : 'resurfaced after ' + REALERT_DAYS + 'd';\n  }\n  items[n] = Object.assign({}, p, { notify: notify, seen: seen, analysis: Object.assign({}, p.analysis || {}, { seen: seen }) });\n}\nreturn items.map((p) => ({ json: p }));",
+        "mode": "runOnceForAllItems"
+      }
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Ensure Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure Schema": {
+      "main": [
+        [
+          {
+            "node": "Get HP Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Now": {
+      "main": [
+        [
+          {
+            "node": "Ensure Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get HP Cursor": {
+      "main": [
+        [
+          {
+            "node": "Build Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Query": {
+      "main": [
+        [
+          {
+            "node": "Search Honeypot Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Honeypot Events": {
+      "main": [
+        [
+          {
+            "node": "Extract Payloads",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Next Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Payloads": {
+      "main": [
+        [
+          {
+            "node": "Upsert Payloads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Unanalysed": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM Analyse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Analyse": {
+      "main": [
+        [
+          {
+            "node": "Parse Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Worth Alerting?": {
+      "main": [
+        [
+          {
+            "node": "Payload Embeds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Payload Embeds": {
+      "main": [
+        [
+          {
+            "node": "Post Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analysis Rows": {
+      "main": [
+        [
+          {
+            "node": "Save Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Next Cursor": {
+      "main": [
+        [
+          {
+            "node": "Save HP Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Payloads": {
+      "main": [
+        [
+          {
+            "node": "Unsigned Payloads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unsigned Payloads": {
+      "main": [
+        [
+          {
+            "node": "Compute Signatures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Signatures": {
+      "main": [
+        [
+          {
+            "node": "Save Signatures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Signatures": {
+      "main": [
+        [
+          {
+            "node": "Refresh Signatures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refresh Signatures": {
+      "main": [
+        [
+          {
+            "node": "Get Unanalysed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Analysis": {
+      "main": [
+        [
+          {
+            "node": "Seen Lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Seen Lookup": {
+      "main": [
+        [
+          {
+            "node": "Apply Seen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Seen": {
+      "main": [
+        [
+          {
+            "node": "Worth Alerting?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Analysis Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "errorWorkflow": "oTbFYlbhb8Dlg0CM",
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [
+    {
+      "id": "3039fb2e-b875-4fdb-a96d-2972696ea741",
+      "name": "Extract and dedupe",
+      "nodeIds": [
+        "b0ace2c8-049a-4b2b-8d55-3bfe14591da2",
+        "f58fa825-a74d-41e4-9573-3cd1212bb345",
+        "e658ca9e-0281-4cee-ad08-075bf1a6b9cf",
+        "c969f1a0-f737-4416-905f-09a8adb3ac9a"
+      ],
+      "description": "Group events by canonical payload, static IOC extraction, md5-keyed upsert into honeypot_payloads, PHP and pure path-traversal payloads skipped."
+    },
+    {
+      "id": "3a37d6e7-7b0e-48ff-9106-52480c9d9caf",
+      "name": "Signatures",
+      "nodeIds": [
+        "04e66eb1-cc24-4b96-8216-99c808a32fef",
+        "cc3ca146-9b70-47ee-ba1b-7f1a1458f320",
+        "99519ea4-a9d8-4b41-b21b-e779945c12af",
+        "a1798b02-9bbd-405e-ab30-eab9a8d7e86a"
+      ],
+      "description": "Shape signature per payload (nonces, JWTs, IPs, OAST hosts stripped). Known signatures without new IOCs inherit analysis, no LLM."
+    },
+    {
+      "id": "e8b3dc00-c52b-4daa-8aa0-480f61b9d8c1",
+      "name": "LLM analysis",
+      "nodeIds": [
+        "d5ab46fe-21f9-49b4-9a83-1c0b76563054",
+        "ff0ebaad-13ee-4c96-91e4-3af98d9a742d",
+        "9186cb36-087b-44b8-94ed-678ce94845be",
+        "1bac1e09-5476-4789-8b73-ab92bdd68b1e"
+      ],
+      "description": "Up to 8 unanalysed payloads per run, heaviest first."
+    },
+    {
+      "id": "d403970b-4b76-45ca-a098-4a353b7b935b",
+      "name": "Seen before?",
+      "nodeIds": [
+        "54ad0aef-a5de-4fa2-bec7-758da4c425d6",
+        "5125f1dc-5e62-4f38-af6c-8fa42ea9c0cd"
+      ],
+      "description": "Suppress if signature alerted in last 30d unless it carries a never-alerted IOC; one alert per signature per batch."
+    },
+    {
+      "id": "0062a67d-32f3-4489-937c-49c1bbd0056a",
+      "name": "Alert",
+      "nodeIds": [
+        "db1c2c60-768f-4d3d-9fa1-038df35b9c76",
+        "da42b96c-e800-4d17-9082-b625e29871dc",
+        "29468e51-b015-48e5-b10f-eba8b90af33a"
+      ],
+      "description": "Posts to #honeypot-payloads."
+    },
+    {
+      "id": "ab442e01-9e96-4aea-aed8-3846d3d2189a",
+      "name": "Persist analysis",
+      "nodeIds": [
+        "0d4dde9e-a69d-48a8-8958-fe406a0a209f",
+        "5199cfc5-caeb-47d5-9697-c5470a33695c"
+      ],
+      "description": "Analysis, notified flag, signature alert stats and IOC ledger."
+    },
+    {
+      "id": "2ad03b5e-0362-453e-be1e-e6c580229100",
+      "name": "Advance cursor",
+      "nodeIds": [
+        "e3f9ed56-2b5a-4350-a162-5a1c7cc07b97",
+        "4a252da8-16ec-466e-9599-84ab9d40ca15"
+      ],
+      "description": "Runs last."
+    }
+  ],
+  "sourceWorkflowId": null,
+  "tags": []
+}

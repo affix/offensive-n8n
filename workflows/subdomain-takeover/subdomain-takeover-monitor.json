@@ -1,0 +1,280 @@
+{
+  "id": "ctxZWf9JE5GOKtvE",
+  "name": "Subdomain Takeover Monitor",
+  "description": "Every 4 hours: read in-scope roots, split them into at most 3 lanes and start one Subdomain Takeover Scan execution per lane.",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_takeover_scope",
+          "cachedResultName": "takeover_scope"
+        },
+        "returnAll": true
+      },
+      "id": "26c29e3d-a6a4-4b72-8d87-edb1d5b4f2a0",
+      "name": "Get Scope",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        224,
+        96
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "ebf2aaa8-551a-42dc-a26f-f2eba61f7724",
+      "name": "Run Now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 4,
+              "triggerAtMinute": 17
+            }
+          ]
+        }
+      },
+      "id": "0d20dc51-3457-4406-8daf-ef99614df96a",
+      "name": "Every 4 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "79n2VgZ4rNWAJoqW",
+          "cachedResultName": "Subdomain Takeover Scan"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "domains": "={{ $json.domains }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "domains",
+              "displayName": "domains",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "array"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "id": "22f3b44e-ea80-4f56-af1b-735ea18b3f77",
+      "name": "Start Scan Lanes",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        896,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Round-robin the domains into at most MAX_PARALLEL lanes. Each lane is one scan execution\n// that works through its domains sequentially, so no more than MAX_PARALLEL scans run at once.\nconst MAX_PARALLEL = 3;\nconst domains = $input.all().map(i => ({ domain: i.json.domain, client: i.json.client ?? null }));\nconst lanes = Array.from({ length: Math.min(MAX_PARALLEL, domains.length) }, () => []);\ndomains.forEach((d, i) => lanes[i % lanes.length].push(d));\nreturn lanes.map(lane => ({ json: { domains: lane } }));"
+      },
+      "id": "744ff43f-6d82-44f2-8a57-e6c8294b3081",
+      "name": "Assign Lanes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Only enabled rows with a strict hostname shape reach the shell command.\n// client is carried forward; an empty value becomes null.\nconst hostname = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/;\nconst seen = new Set();\nconst out = [];\nfor (const item of $input.all()) {\n  if (item.json.enabled === false) continue;\n  const domain = String(item.json.domain ?? '').trim().toLowerCase();\n  if (!hostname.test(domain) || seen.has(domain)) continue;\n  seen.add(domain);\n  const client = String(item.json.client ?? '').trim() || null;\n  out.push({ json: { domain, client } });\n}\nreturn out;"
+      },
+      "id": "435c3659-7c20-449f-b518-36815a8d4030",
+      "name": "Validate Domains",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        96
+      ]
+    },
+    {
+      "id": "4e08b20b-c030-4e83-8153-fa71a7e16514",
+      "name": "One-off Scan Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {
+        "authentication": "n8nUserAuth",
+        "requireExecuteAccess": true,
+        "formTitle": "Subdomain Takeover Scan",
+        "formDescription": "Run a one-off takeover scan for a single root domain. New findings and failures are posted to #n8n-alerts. The domain is not added to the scheduled scope.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Domain",
+              "fieldName": "domain",
+              "fieldType": "text",
+              "placeholder": "example.com",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Client",
+              "fieldName": "client",
+              "fieldType": "text",
+              "placeholder": "Optional, used to tag alerts",
+              "requiredField": false
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {
+          "appendAttribution": false,
+          "buttonLabel": "Start scan",
+          "path": "takeover-scan",
+          "respondWithOptions": {
+            "values": {
+              "respondWith": "text",
+              "formSubmittedText": "Scan started. Results will be posted to #n8n-alerts when it finishes."
+            }
+          }
+        }
+      },
+      "webhookId": "4bbb4cc9-3829-4d58-840a-a3ed0b5af7a6"
+    },
+    {
+      "id": "95257c24-86ba-4d0d-b5d0-8f8de1124cee",
+      "name": "Prepare One-off Scan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        400
+      ],
+      "parameters": {
+        "jsCode": "// Builds a single lane from the form so it reuses the same scan workflow as the schedule.\n// Accepts a pasted URL and reduces it to the hostname before the strict check.\nconst hostname = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/;\nconst form = $input.first().json;\nconst domain = String(form.domain ?? form.Domain ?? '').trim().toLowerCase()\n  .replace(/^[a-z]+:\\/\\//, '').split(/[/:?#]/)[0].replace(/\\.$/, '');\nif (!hostname.test(domain)) throw new Error(`Not a valid domain: ${domain || '(empty)'}`);\nconst client = String(form.client ?? form.Client ?? '').trim() || null;\nreturn [{ json: { domains: [{ domain, client }] } }];"
+      }
+    }
+  ],
+  "connections": {
+    "Get Scope": {
+      "main": [
+        [
+          {
+            "node": "Validate Domains",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Now": {
+      "main": [
+        [
+          {
+            "node": "Get Scope",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 4 Hours": {
+      "main": [
+        [
+          {
+            "node": "Get Scope",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign Lanes": {
+      "main": [
+        [
+          {
+            "node": "Start Scan Lanes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Domains": {
+      "main": [
+        [
+          {
+            "node": "Assign Lanes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One-off Scan Form": {
+      "main": [
+        [
+          {
+            "node": "Prepare One-off Scan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare One-off Scan": {
+      "main": [
+        [
+          {
+            "node": "Start Scan Lanes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

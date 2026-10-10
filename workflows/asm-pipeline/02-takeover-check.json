@@ -1,0 +1,158 @@
+{
+  "id": "Bspp8isopjpCK6iC",
+  "name": "ASM · 02 Takeover Check",
+  "description": "Stage 2: nuclei takeover templates against every CNAME host from discovery. Writes findings/takeover.jsonl.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "89938b14-475c-4954-9880-537fdfaf7879",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "89e8e1ad-2131-4e8a-902b-ebc2b0008c97",
+      "name": "Build Takeover Check Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STAGE = 'takeover';\nconst MAX_MINUTES = 60;\nconst BODY = \"mkdir -p \\\"$R/findings\\\"\\nIN=\\\"$R/discovery/cname_hosts.txt\\\"\\n: > nuclei.jsonl\\nif [ -s \\\"$IN\\\" ]; then\\n  timeout 60m nuclei -l \\\"$IN\\\" -tags takeover -dr -jsonl -silent -nc -duc -rl \\\"$RATE\\\" -o nuclei.jsonl >/dev/null 2>nuclei.log || true\\n  touch nuclei.jsonl\\nfi\\npython3 - \\\"$ENG\\\" nuclei.jsonl \\\"$R/findings/takeover.jsonl\\\" \\\"$S\\\" <<'PY'\\nimport json, sys\\neng, src, dst, evid = sys.argv[1:5]\\nout, seen = [], set()\\nfor line in open(src):\\n    try:\\n        f = json.loads(line)\\n    except ValueError:\\n        continue\\n    host = (f.get(\\\"host\\\") or \\\"\\\").split(\\\"://\\\")[-1].split(\\\"/\\\")[0].split(\\\":\\\")[0].lower()\\n    tid = f.get(\\\"template-id\\\", \\\"\\\")\\n    key = f\\\"{eng}|takeover|{tid}|{host}\\\"\\n    if not host or key in seen:\\n        continue\\n    seen.add(key)\\n    info = f.get(\\\"info\\\") or {}\\n    out.append({\\\"finding_key\\\": key, \\\"source\\\": \\\"takeover\\\", \\\"host\\\": host, \\\"url\\\": f.get(\\\"matched-at\\\", \\\"\\\"),\\n                \\\"template_id\\\": tid, \\\"name\\\": info.get(\\\"name\\\", \\\"\\\"), \\\"severity\\\": info.get(\\\"severity\\\", \\\"unknown\\\"),\\n                \\\"matched_at\\\": f.get(\\\"matched-at\\\", \\\"\\\"), \\\"evidence_dir\\\": evid,\\n                \\\"detail\\\": (info.get(\\\"description\\\") or \\\"\\\")[:400]})\\nwith open(dst, \\\"w\\\") as fh:\\n    for o in out:\\n        fh.write(json.dumps(o) + \\\"\\\\n\\\")\\nprint(json.dumps({\\\"takeover_findings\\\": len(out)}), file=open(\\\"result.json\\\", \\\"w\\\"))\\nPY\\n\";\nconst c = $input.first().json;\nconst SAFE = /^[A-Za-z0-9_.\\/:-]+$/;\nconst q = (k) => {\n  const v = String(c[k] ?? '');\n  if (!SAFE.test(v)) throw new Error(`Unsafe or missing context value for ${k}: ${v}`);\n  return `'${v}'`;\n};\nconst int = (v, lo, hi, d) => Math.min(Math.max(parseInt(v ?? d, 10) || d, lo), hi);\nconst header = [\n  '#!/usr/bin/env bash',\n  'set -uo pipefail',\n  `R=${q('run_dir')}`,\n  `S=${q('run_dir').slice(0, -1)}/${STAGE}'`,\n  `ENG=${q('engagement')}`,\n  `RUN_ID=${q('run_id')}`,\n  `STATE=${q('state_dir')}`,\n  `RATE=${int(c.rate, 1, 500, 50)}`,\n  `PORT_RATE=${int(c.port_rate, 50, 2000, 500)}`,\n  `INTRUSIVE=${c.intrusive === true ? 1 : 0}`,\n  `PERMUTE=${c.permute === true ? 1 : 0}`,\n  'mkdir -p \"$S\" && cd \"$S\" || exit 1',\n  ''\n].join('\\n');\nreturn [{ json: { job_dir: `${c.run_dir}/${STAGE}`, script: header + BODY, max_minutes: MAX_MINUTES } }];\n"
+      }
+    },
+    {
+      "id": "52ba9b95-ab20-4b68-9c9d-8aafd9d83e5c",
+      "name": "Run Takeover Check",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "QptyXc2oFNL8f8gX",
+          "cachedResultName": "ASM · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "ea7fa7cb-b307-491a-84a9-61d1b1a80e91",
+      "name": "Return Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst r = $input.first().json;\nconst stages = { ...(ctx.stages ?? {}), takeover: { ...(r.result ?? {}), rc: r.rc, timed_out: r.timed_out } };\nreturn [{ json: { ...ctx, stages } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Build Takeover Check Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Takeover Check Script": {
+      "main": [
+        [
+          {
+            "node": "Run Takeover Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Takeover Check": {
+      "main": [
+        [
+          {
+            "node": "Return Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

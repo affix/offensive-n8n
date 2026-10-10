@@ -1,0 +1,222 @@
+{
+  "id": "eu0VVUdYxslIgEeb",
+  "name": "IP Threat Intel",
+  "description": null,
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "ipAddress"
+            }
+          ]
+        }
+      },
+      "id": "c055762a-8fe7-4141-a639-df2372f30060",
+      "typeVersion": 1.1,
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "position": [
+        -448,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.abuseipdb.com/api/v2/check",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpMultipleHeadersAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "ipAddress",
+              "value": "={{ $json.ipAddress }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -112,
+        320
+      ],
+      "id": "b8c7634f-9f79-4acb-bf59-18edcbd726cc",
+      "name": "Abuse IPDB",
+      "credentials": {
+        "httpMultipleHeadersAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "IP Abuse DB"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://www.virustotal.com/api/v3/ip_addresses/{{ $json['ipAddress'] }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpMultipleHeadersAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -112,
+        512
+      ],
+      "id": "eaeab0b2-2c08-44c6-b536-1dc391d58cdc",
+      "name": "Virus Total",
+      "credentials": {
+        "httpMultipleHeadersAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "VT API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.greynoise.io/v3/community/{{ $json['ipAddress']}}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpMultipleHeadersAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -112,
+        672
+      ],
+      "id": "820b6746-f6c3-4fb1-a588-ebab2107fda5",
+      "name": "Greynoise",
+      "credentials": {
+        "httpMultipleHeadersAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "Greynoise API"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "=https://otx.alienvault.com/api/v1/indicators/IPv4/{{ $json['ipAddress'] }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpMultipleHeadersAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -112,
+        864
+      ],
+      "id": "b696a3ce-84a0-400f-a3fe-ad69d7039210",
+      "name": "OTX",
+      "credentials": {
+        "httpMultipleHeadersAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "OTX API Key"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "numberInputs": 4
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        304,
+        592
+      ],
+      "id": "ea1d1942-a82f-4b32-95cd-cdef46be1690",
+      "name": "Merge"
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Abuse IPDB",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Virus Total",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Greynoise",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "OTX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Abuse IPDB": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OTX": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Greynoise": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Virus Total": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": true
+  },
+  "meta": null,
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

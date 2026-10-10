@@ -1,0 +1,158 @@
+{
+  "id": "hdrbg87GU7HdPoj2",
+  "name": "ASM · 03 Port Scan",
+  "description": "Stage 3: naabu SYN top-1000 (CDN-aware) on in-scope IPs, then nmap -sV -sC only on ports not seen before. Writes open.txt and services.jsonl.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "6338a96c-bf75-4612-b702-540ca6fa3652",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "8292c51b-18a8-4fbd-bea9-e46231740e5f",
+      "name": "Build Port Scan Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STAGE = 'ports';\nconst MAX_MINUTES = 240;\nconst BODY = \"IPS=\\\"$R/discovery/ips.txt\\\"\\nmkdir -p \\\"$STATE\\\" nmap\\ntouch \\\"$STATE/ports.txt\\\"\\n: > naabu.jsonl\\nif [ -s \\\"$IPS\\\" ]; then\\n  timeout 120m sudo -n /usr/bin/naabu -list \\\"$IPS\\\" -top-ports 1000 -s s -rate \\\"$PORT_RATE\\\" -retries 1 \\\\\\n    -exclude-cdn -silent -json -o naabu.jsonl >/dev/null 2>naabu.log || true\\n  touch naabu.jsonl\\nfi\\njq -r 'select(.ip and .port) | \\\"\\\\(.ip):\\\\(.port)\\\"' naabu.jsonl 2>/dev/null | sort -u > open.txt\\nsort -u \\\"$STATE/ports.txt\\\" > known.txt\\ncomm -23 open.txt known.txt > open.new.txt\\n\\npython3 - open.new.txt > nmap_groups.txt <<'PY'\\nimport ipaddress, sys\\ngroups = {}\\nfor line in open(sys.argv[1]):\\n    ip, _, port = line.strip().rpartition(\\\":\\\")\\n    try:\\n        ipaddress.ip_address(ip)\\n        p = int(port)\\n    except ValueError:\\n        continue\\n    if 0 < p < 65536:\\n        groups.setdefault(ip, set()).add(p)\\nfor ip, ports in groups.items():\\n    print(ip, \\\",\\\".join(str(p) for p in sorted(ports)))\\nPY\\n\\nwhile read -r ip ports; do\\n  timeout 15m sudo -n /usr/bin/nmap -sV -sC -Pn -T4 --host-timeout 12m --script-timeout 60s \\\\\\n    -p \\\"$ports\\\" -oX \\\"nmap/$ip.xml\\\" \\\"$ip\\\" >/dev/null 2>>nmap.log || true\\ndone < nmap_groups.txt\\n\\npython3 - <<'PY'\\nimport glob, json\\nimport xml.etree.ElementTree as ET\\nout = open(\\\"services.jsonl\\\", \\\"w\\\")\\nn = 0\\nfor path in glob.glob(\\\"nmap/*.xml\\\"):\\n    try:\\n        root = ET.parse(path).getroot()\\n    except ET.ParseError:\\n        continue\\n    for host in root.iter(\\\"host\\\"):\\n        addr = host.find(\\\"address\\\")\\n        ip = addr.get(\\\"addr\\\") if addr is not None else \\\"\\\"\\n        for p in host.iter(\\\"port\\\"):\\n            st = p.find(\\\"state\\\")\\n            if st is None or st.get(\\\"state\\\") != \\\"open\\\":\\n                continue\\n            sv = p.find(\\\"service\\\")\\n            sv = sv.attrib if sv is not None else {}\\n            scripts = {s.get(\\\"id\\\"): (s.get(\\\"output\\\") or \\\"\\\")[:300] for s in p.findall(\\\"script\\\")}\\n            out.write(json.dumps({\\\"ip\\\": ip, \\\"port\\\": int(p.get(\\\"portid\\\")), \\\"proto\\\": p.get(\\\"protocol\\\"),\\n                                  \\\"service\\\": sv.get(\\\"name\\\", \\\"\\\"), \\\"product\\\": sv.get(\\\"product\\\", \\\"\\\"),\\n                                  \\\"version\\\": sv.get(\\\"version\\\", \\\"\\\"), \\\"extrainfo\\\": sv.get(\\\"extrainfo\\\", \\\"\\\"),\\n                                  \\\"tunnel\\\": sv.get(\\\"tunnel\\\", \\\"\\\"), \\\"scripts\\\": scripts}) + \\\"\\\\n\\\")\\n            n += 1\\nout.close()\\nPY\\n\\njq -nc --argjson open \\\"$(wc -l < open.txt)\\\" --argjson new \\\"$(wc -l < open.new.txt)\\\" \\\\\\n  --argjson scanned \\\"$(wc -l < nmap_groups.txt)\\\" '{ports_open: $open, ports_new: $new, nmap_hosts: $scanned}' > result.json\\n\";\nconst c = $input.first().json;\nconst SAFE = /^[A-Za-z0-9_.\\/:-]+$/;\nconst q = (k) => {\n  const v = String(c[k] ?? '');\n  if (!SAFE.test(v)) throw new Error(`Unsafe or missing context value for ${k}: ${v}`);\n  return `'${v}'`;\n};\nconst int = (v, lo, hi, d) => Math.min(Math.max(parseInt(v ?? d, 10) || d, lo), hi);\nconst header = [\n  '#!/usr/bin/env bash',\n  'set -uo pipefail',\n  `R=${q('run_dir')}`,\n  `S=${q('run_dir').slice(0, -1)}/${STAGE}'`,\n  `ENG=${q('engagement')}`,\n  `RUN_ID=${q('run_id')}`,\n  `STATE=${q('state_dir')}`,\n  `RATE=${int(c.rate, 1, 500, 50)}`,\n  `PORT_RATE=${int(c.port_rate, 50, 2000, 500)}`,\n  `INTRUSIVE=${c.intrusive === true ? 1 : 0}`,\n  `PERMUTE=${c.permute === true ? 1 : 0}`,\n  'mkdir -p \"$S\" && cd \"$S\" || exit 1',\n  ''\n].join('\\n');\nreturn [{ json: { job_dir: `${c.run_dir}/${STAGE}`, script: header + BODY, max_minutes: MAX_MINUTES } }];\n"
+      }
+    },
+    {
+      "id": "c09b46ce-34c0-4307-bc89-15614d5515af",
+      "name": "Run Port Scan",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "QptyXc2oFNL8f8gX",
+          "cachedResultName": "ASM · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "c20e6283-d27e-4c06-8778-c6209145781f",
+      "name": "Return Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst r = $input.first().json;\nconst stages = { ...(ctx.stages ?? {}), ports: { ...(r.result ?? {}), rc: r.rc, timed_out: r.timed_out } };\nreturn [{ json: { ...ctx, stages } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Build Port Scan Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Port Scan Script": {
+      "main": [
+        [
+          {
+            "node": "Run Port Scan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Port Scan": {
+      "main": [
+        [
+          {
+            "node": "Return Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

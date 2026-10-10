@@ -1,0 +1,1047 @@
+{
+  "id": "MOPAwWmceIXOCFNI",
+  "name": "Wazuh · Alert Triage",
+  "description": "Polls the Wazuh indexer every 5 min for level 12+ alerts. Fingerprints, suppresses, dedupes and collapses bursts, enriches source IPs (AbuseIPDB), LLM-triages the rest and only pages Discord on escalations. Daily digest of noisy rules.",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes"
+            }
+          ]
+        }
+      },
+      "id": "c9e13565-8836-4bcd-a71c-476ec47178ee",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_wazuh_state",
+          "cachedResultName": "wazuh_state"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "key",
+              "keyValue": "cursor"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "1f709fc1-5c63-4dfe-9647-04249979c566",
+      "name": "Get Cursor",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        224,
+        304
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {},
+      "id": "3bc8a14d-d8cc-4267-9214-65a3c7a9a1fa",
+      "name": "Poll Now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const MIN_LEVEL = 12;\nconst row = $('Get Cursor').all().map((i) => i.json).find((r) => r && r.key === 'cursor');\nconst nowMs = Date.now();\nconst activeWatch = $input.all().map((i) => i.json).filter((w) => w && w.enabled === true && w.value && (!w.expires || new Date(w.expires).getTime() > nowMs));\nconst watchCves = activeWatch.filter((w) => String(w.type || '').toLowerCase() === 'cve').map((w) => String(w.value).trim().toUpperCase());\n// Watch-listed detection IDs are fetched whatever their rule level, so lower-level\n// events you care about still reach Classify.\n// data.detections.id is a keyword field, so the terms match is exact.\nconst watchDetections = Array.from(new Set(activeWatch.filter((w) => String(w.type || '').toLowerCase() === 'detection_id').map((w) => String(w.value).trim().toUpperCase())));\nlet prev = {};\ntry { prev = row ? JSON.parse(row.value || '{}') : {}; } catch (e) { prev = {}; }\nconst since = prev.ts || new Date(Date.now() - 15 * 60000).toISOString();\nconst EXCLUDE_GROUPS = ['vulnerability-detector'];\nconst excl = { bool: { filter: [{ terms: { 'rule.groups': EXCLUDE_GROUPS } }] } };\nif (watchCves.length) excl.bool.must_not = [{ terms: { 'data.vulnerability.cve': watchCves } }];\nconst mustNot = [excl];\nif (prev.ids && prev.ids.length) mustNot.push({ ids: { values: prev.ids } });\nconst levelOrWatch = [{ range: { 'rule.level': { gte: MIN_LEVEL } } }];\nif (watchDetections.length) levelOrWatch.push({ terms: { 'data.detections.id': watchDetections } });\nconst body = {\n  size: 500,\n  sort: [{ timestamp: { order: 'asc' } }],\n  query: { bool: { filter: [{ bool: { should: levelOrWatch, minimum_should_match: 1 } }, { range: { timestamp: { gte: since } } }], must_not: mustNot } },\n  _source: ['timestamp', 'rule', 'agent', 'data', 'syscheck', 'location', 'full_log', 'decoder.name']\n};\nreturn [{ json: { body: body, since: since, prev: prev } }];"
+      },
+      "id": "137bcb7a-033d-4388-839b-f515c236a944",
+      "name": "Build Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://WAZUH_INDEXER:9200/wazuh-alerts-4.x-*/_search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "timeout": 30000
+        }
+      },
+      "id": "0f8056b0-f5ee-4477-af0a-c672be0895aa",
+      "name": "Search Alerts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        672,
+        304
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "Wazuh Opensearch"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const hits = (($input.first().json.hits || {}).hits) || [];\nconst g = (o, p) => p.split('.').reduce((a, k) => (a === undefined || a === null ? undefined : a[k]), o);\nconst pick = (...v) => { for (const x of v) if (x !== undefined && x !== null && String(x) !== '') return String(x); return ''; };\nconst isPrivate = (ip) => {\n  if (!ip) return true;\n  if (ip.includes(':')) return /^(::1|fe80:|fc|fd)/i.test(ip);\n  const p = ip.split('.').map(Number);\n  if (p.length !== 4 || p.some((n) => Number.isNaN(n))) return true;\n  return p[0] === 10 || p[0] === 127 || p[0] === 0 || (p[0] === 172 && p[1] >= 16 && p[1] <= 31) || (p[0] === 192 && p[1] === 168) || (p[0] === 169 && p[1] === 254) || (p[0] === 100 && p[1] >= 64 && p[1] <= 127);\n};\nconst iso = (t) => { const d = new Date(String(t || '').replace(/([+-][0-9]{2})([0-9]{2})$/, '$1:$2')); return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString(); };\nreturn hits.map((h) => {\n  const s = h._source || {};\n  const r = s.rule || {};\n  const d = s.data || {};\n  const text = String(r.description || '') + ' ' + String(s.full_log || '');\n  const fromIp = (text.match(/from ([0-9]{1,3}(?:[.][0-9]{1,3}){3})/) || [])[1];\n  const anyIp = (String(r.description || '').match(/([0-9]{1,3}(?:[.][0-9]{1,3}){3})/) || [])[1];\n  const srcip = pick(d.srcip, d.src_ip, g(d, 'win.eventdata.ipAddress'), g(d, 'aws.sourceIPAddress'), fromIp, anyIp);\n  const user = pick(d.dstuser, d.srcuser, d.user, g(d, 'win.eventdata.targetUserName'), g(d, 'win.eventdata.subjectUserName'));\n  const path = pick(g(s, 'syscheck.path'));\n  const cve = pick(g(d, 'vulnerability.cve'), g(d, 'vulnerability.id'));\n  const pkg = pick(g(d, 'vulnerability.package.name'));\n  const agent = pick(g(s, 'agent.name'), 'manager');\n  const dets = [].concat(g(d, 'detections') || []).filter((x) => x && typeof x === 'object');\n  const detIds = Array.from(new Set(dets.map((x) => String(x.id || '')).filter(Boolean)));\n  const detNames = Array.from(new Set(dets.map((x) => String(x.name || '')).filter(Boolean)));\n  const cveSet = new Set();\n  for (const x of dets) for (const c of [].concat(x.cves || [])) cveSet.add(String(c).toUpperCase());\n  if (cve) cveSet.add(cve.toUpperCase());\n  for (const m of (String(s.full_log || '') + ' ' + String(r.description || '')).match(/CVE-[0-9]{4}-[0-9]{4,}/gi) || []) cveSet.add(m.toUpperCase());\n  return { json: {\n    id: h._id, ts: iso(s.timestamp),\n    fingerprint: [r.id, pick(g(s, 'agent.id'), agent), srcip, user, path, cve, pkg].join('|'),\n    rule_id: String(r.id || ''), level: Number(r.level || 0), description: String(r.description || '').slice(0, 300),\n    groups: [].concat(r.groups || []).join(','), mitre: [].concat(g(r, 'mitre.id') || []).join(','), tactics: [].concat(g(r, 'mitre.tactic') || []).join(','),\n    agent: agent, srcip: srcip, srcip_external: !isPrivate(srcip), user: user, path: path, cve: cve,\n    cves: Array.from(cveSet), detection_ids: detIds, detection_names: detNames,\n    hp_outcome: pick(d.outcome), hp_status: pick(d.response_status), hp_path: pick(g(d, 'http.path')),\n    location: String(s.location || ''), decoder: pick(g(s, 'decoder.name')),\n    log: String(s.full_log || JSON.stringify(d)).slice(0, 800)\n  } };\n});\n"
+      },
+      "id": "e10aecee-6655-440e-b65d-42824fb796b1",
+      "name": "Normalise",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_wazuh_suppress",
+          "cachedResultName": "wazuh_suppress"
+        },
+        "returnAll": true
+      },
+      "id": "84c2d0a9-86bd-4efb-9070-c7a6b7c6f262",
+      "name": "Get Suppress Rules",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1104,
+        208
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const DEDUP_HOURS = 6;\nconst NOISE_HOURS = 24;\nconst BURST = 8;\nconst MAX_TRIAGE = 15;\nconst MAX_LOOKUPS = 4;\nconst now = Date.now();\nconst force = ((($('Build Query').first().json || {}).prev) || {}).force === true;\nconst alerts = $('Normalise').all().map((i) => i.json);\nconst rules = $('Get Suppress Rules').all().map((i) => i.json).filter((r) => r && r.enabled === true && (!r.expires || new Date(r.expires).getTime() > now));\nconst WATCH_REPEAT_MIN = 60;\nconst watch = $('Get Watchlist').all().map((i) => i.json).filter((w) => w && w.enabled === true && w.value && (!w.expires || new Date(w.expires).getTime() > now));\nconst lc = (v) => String(v === undefined || v === null ? '' : v).trim().toLowerCase();\nconst watchHits = (a) => {\n  const hits = [];\n  for (const w of watch) {\n    const t = lc(w.type);\n    const v = lc(w.value);\n    let ok = false;\n    if (t === 'cve') ok = (a.cves || []).some((x) => lc(x) === v);\n    else if (t === 'detection_id') ok = (a.detection_ids || []).some((x) => lc(x) === v);\n    else if (t === 'rule_id') ok = lc(a.rule_id) === v;\n    else if (t === 'field' && w.field) { try { ok = new RegExp(String(w.value), 'i').test(String(a[w.field] === undefined ? '' : a[w.field])); } catch (e) { ok = false; } }\n    if (ok) hits.push(t + ' ' + w.value + (w.reason ? ' (' + w.reason + ')' : ''));\n  }\n  return hits;\n};\nconst recent = {};\nfor (const i of $input.all()) { const r = i.json; if (r && r.fingerprint) recent[r.fingerprint] = r; }\nconst test = (r, a) => {\n  if (r.rule_id && String(r.rule_id).split(',').map((x) => x.trim()).indexOf(a.rule_id) < 0) return false;\n  if (r.agent && String(r.agent).toLowerCase() !== String(a.agent).toLowerCase()) return false;\n  if (r.field && r.pattern) { try { return new RegExp(r.pattern, 'i').test(String(a[r.field] === undefined ? '' : a[r.field])); } catch (e) { return false; } }\n  return !!(r.rule_id || r.agent);\n};\nconst groups = {};\nfor (const a of alerts) {\n  const g = groups[a.fingerprint];\n  if (g) {\n    g.batch += 1; if (a.ts > g.last) g.last = a.ts; if (a.ts < g.first) g.first = a.ts;\n    for (const k of ['cves', 'detection_ids', 'detection_names']) g[k] = Array.from(new Set((g[k] || []).concat(a[k] || [])));\n  }\n  else groups[a.fingerprint] = Object.assign({}, a, { batch: 1, first: a.ts, last: a.ts });\n}\nconst out = [];\nconst cand = [];\nfor (const a of Object.values(groups)) {\n  const prev = recent[a.fingerprint];\n  a.prev_count = prev ? Number(prev.count || 0) : 0;\n  a.prev_verdict = prev ? (prev.verdict || '') : '';\n  a.first_seen = prev && prev.first_seen ? prev.first_seen : a.first;\n  a.notified = prev ? prev.notified === true : false;\n  a.fp_percent = prev && prev.fp_percent !== undefined ? prev.fp_percent : null;\n  a.summary = prev ? (prev.summary || '') : '';\n  a.intel = prev ? (prev.intel || '') : '';\n  a.suppress_hint = prev ? (prev.suppress_hint || '') : '';\n  const wh = watchHits(a);\n  if (wh.length) {\n    a.watch = wh;\n    const recentWatch = prev && prev.notified === true && prev.last_seen && (now - new Date(prev.last_seen).getTime()) < WATCH_REPEAT_MIN * 60000;\n    if (recentWatch && !force) { a.action = 'record'; a.verdict = 'escalate'; a.reason = 'watchlist repeat within ' + WATCH_REPEAT_MIN + 'm: ' + wh.join('; '); out.push(a); continue; }\n    a.action = 'triage'; a.watch_forced = true; out.push(a); continue;\n  }\n  const rule = rules.find((r) => test(r, a));\n  if (rule) { a.action = 'record'; a.verdict = 'suppressed'; a.reason = 'suppress rule: ' + (rule.reason || rule.id); out.push(a); continue; }\n  const age = prev && prev.last_seen ? (now - new Date(prev.last_seen).getTime()) / 3600000 : 1e9;\n  const win = prev && prev.verdict === 'noise' ? NOISE_HOURS : DEDUP_HOURS;\n  if (!force && prev && age < win && ['escalate', 'monitor', 'noise', 'burst', 'untriaged'].indexOf(prev.verdict) >= 0) {\n    a.action = 'record'; a.verdict = prev.verdict; a.reason = 'repeat within ' + win + 'h'; out.push(a); continue;\n  }\n  cand.push(a);\n}\nconst byRule = {};\nfor (const a of cand) (byRule[a.rule_id] = byRule[a.rule_id] || []).push(a);\nconst triage = [];\nfor (const list of Object.values(byRule)) {\n  if (list.length >= BURST) {\n    list.sort((x, y) => y.level - x.level || y.batch - x.batch);\n    const head = list[0];\n    head.burst = list.length;\n    head.burst_events = list.reduce((n, x) => n + x.batch, 0);\n    head.burst_sample = list.slice(0, 10).map((x) => [x.agent, x.srcip, x.user, x.path].filter(Boolean).join(' ')).join('; ');\n    triage.push(head);\n    for (const x of list.slice(1)) { x.action = 'record'; x.verdict = 'burst'; x.reason = 'part of burst on rule ' + x.rule_id + ' (see ' + head.fingerprint + ')'; out.push(x); }\n  } else for (const x of list) triage.push(x);\n}\ntriage.sort((x, y) => y.level - x.level || y.batch - x.batch);\nconst ipCache = {};\nfor (const r of Object.values(recent)) if (r.srcip && r.intel) ipCache[r.srcip] = r.intel;\nconst asked = {};\nlet lookups = 0;\nfor (const a of out) {\n  if (a.watch_forced && a.srcip_external) {\n    if (ipCache[a.srcip]) a.intel = ipCache[a.srcip];\n    else if (!asked[a.srcip] && lookups < MAX_LOOKUPS) { a.lookup = true; asked[a.srcip] = true; lookups += 1; }\n  }\n}\ntriage.forEach((a, n) => {\n  if (n < MAX_TRIAGE || a.level >= 15) a.action = 'triage';\n  else { a.action = 'record'; a.verdict = 'untriaged'; a.reason = 'over per-run triage cap'; }\n  if (a.action === 'triage' && a.srcip_external) {\n    if (ipCache[a.srcip]) a.intel = ipCache[a.srcip];\n    else if (!asked[a.srcip] && lookups < MAX_LOOKUPS) { a.lookup = true; asked[a.srcip] = true; lookups += 1; }\n  }\n  out.push(a);\n});\nreturn out.map((a) => ({ json: a }));\n"
+      },
+      "id": "db196a49-d569-4f19-bc12-8baf11361f5f",
+      "name": "Classify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "triage",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "id": "21d7d4f8-6b5f-4c73-b630-097c39caa1dd"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "dd488748-81d2-4e03-98bc-e08a32981948",
+      "name": "Needs Triage?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1568,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.lookup === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "id": "541a8ee9-fb55-4be1-84f6-bb244778977f"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1fb2bccd-4eff-442a-84ca-8d38cb98c4b3",
+      "name": "External Source IP?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2512,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const a = $json;\nlet intel = a.ti || null;\nif (!intel && a.intel) { try { intel = JSON.parse(a.intel); } catch (e) { intel = null; } }\nconst SYS = 'You triage Wazuh SIEM alerts of level 12 or higher for a self-hosted environment. Decide whether a human must act now. ' +\n  'Respond with JSON only, exactly these keys: {\"false_positive_percent\": integer 0-100 where 0 means a real threat needing action and 100 means benign noise, \"verdict\": \"escalate\" or \"monitor\" or \"noise\", \"summary\": one sentence a responder can act on, \"reasoning\": at most two sentences, \"suppress_hint\": if noise, the narrowest suppression as rule_id plus field plus regex, otherwise an empty string}. ' +\n  'Escalate: evidence of compromise, successful authentication after failures, new or elevated accounts, malware or rootkit indicators, integrity changes to binaries, cron, sudoers, SSH or PAM config, successful exploitation, lateral movement, an IP with strong bad reputation that got further than a failed attempt. ' +\n  'Noise: file changes explained by package managers or config management, repeated benign service errors, vulnerability detector findings with no exposure context, known activity from authorised internal scanners. Failed inbound internet scanning or brute force with no success is monitor, not escalate. ' +\n  'Many repeats of the same alert with no success raise false_positive_percent. Do not invent facts that are not in the alert.';\nconst input = {\n  rule: { id: a.rule_id, level: a.level, description: a.description, groups: a.groups, mitre: a.mitre, tactics: a.tactics, decoder: a.decoder },\n  agent: a.agent, location: a.location, srcip: a.srcip, srcip_is_external: a.srcip_external, user: a.user, path: a.path, cve: a.cve,\n  events_this_poll: a.batch, burst_distinct_entities: a.burst || 0, burst_sample: a.burst_sample || '',\n  events_last_24h: a.prev_count, previous_verdict: a.prev_verdict, ip_reputation: intel, log: a.log\n};\nreturn { json: Object.assign({}, a, {\n  intel_obj: intel,\n  intel: intel ? JSON.stringify(intel).slice(0, 2000) : '',\n  ollama_body: { model: 'OLLAMA_MODEL', stream: false, think: false, format: 'json', keep_alive: '15m', options: { temperature: 0.1 }, messages: [{ role: 'system', content: SYS }, { role: 'user', content: JSON.stringify(input) }] }\n}) };\n"
+      },
+      "id": "0ad92131-df54-4c00-96e4-4a0fee536fb1",
+      "name": "Attach Intel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2960,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map((i) => {\n  const a = i.json;\n  return {\n    fingerprint: a.fingerprint, rule_id: a.rule_id, level: a.level, description: a.description, agent: a.agent,\n    srcip: a.srcip || '', user: a.user || '', groups: a.groups || '', first_seen: a.first_seen || a.first, last_seen: a.last,\n    count: a.batch || 1, verdict: a.verdict || 'untriaged', reason: a.reason || '',\n    fp_percent: a.fp_percent === undefined ? null : a.fp_percent, summary: a.summary || '', intel: a.intel || '',\n    suppress_hint: a.suppress_hint || '', notified: a.notified === true, sample_id: a.id\n  };\n});\nreturn [{ json: { n: rows.length, rows: JSON.stringify(rows) } }];\n"
+      },
+      "id": "2e46ed49-8002-4ec2-9215-6a69702269a9",
+      "name": "To Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4512,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://OLLAMA_HOST:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.ollama_body) }}",
+        "options": {
+          "timeout": 90000
+        }
+      },
+      "id": "289d5ec0-9c01-4fe4-b9c8-222453542477",
+      "name": "LLM Triage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3168,
+        240
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $('Attach Intel').all().map((i) => i.json);\nconst res = $input.all().map((i) => i.json);\nreturn src.map((a, n) => {\n  let t = {};\n  try { t = JSON.parse((res[n] && res[n].message && res[n].message.content) || '{}'); } catch (e) { t = {}; }\n  const raw = t.false_positive_percent;\n  const fp = raw === undefined || raw === null || raw === '' || Number.isNaN(Number(raw)) ? null : Math.max(0, Math.min(100, Math.round(Number(raw))));\n  const ti = a.intel_obj || {};\n  const badRep = Number(ti.abuse_score || 0) >= 75 || Number(ti.vt_malicious || 0) >= 5 || ti.gn_class === 'malicious';\n  const repNote = 'AbuseIPDB ' + (ti.abuse_score === undefined ? '?' : ti.abuse_score) + '%, VT ' + (ti.vt_malicious === undefined ? '?' : ti.vt_malicious) + ' malicious';\n  let verdict;\n  let reason;\n  if (a.watch && a.watch.length) { verdict = 'escalate'; reason = 'watchlist: ' + a.watch.join('; '); }\n  else if (fp === null) { verdict = a.level >= 15 || badRep ? 'escalate' : 'monitor'; reason = 'LLM unavailable, rule fallback (' + (a.level >= 15 ? 'level ' + a.level : badRep ? 'bad reputation: ' + repNote : 'no strong signal') + ')'; }\n  else if (a.level >= 15) { verdict = 'escalate'; reason = 'level 15 always escalates'; }\n  else if (a.burst) { verdict = fp >= 80 ? 'monitor' : 'escalate'; reason = 'burst: ' + a.burst + ' entities on one rule, fp ' + fp + '%'; }\n  else if (fp < 50) { verdict = 'escalate'; reason = 'fp ' + fp + '%'; }\n  else if (badRep && fp < 80) { verdict = 'escalate'; reason = 'fp ' + fp + '%, bad reputation (' + repNote + ')'; }\n  else if (fp < 80) { verdict = 'monitor'; reason = 'fp ' + fp + '%'; }\n  else { verdict = 'noise'; reason = 'fp ' + fp + '%'; }\n  return { json: Object.assign({}, a, {\n    verdict: verdict, reason: reason, fp_percent: fp,\n    summary: String(t.summary || '').slice(0, 400), reasoning: String(t.reasoning || '').slice(0, 400),\n    suppress_hint: verdict === 'noise' ? String(t.suppress_hint || '').slice(0, 300) : '',\n    notify: verdict === 'escalate', notified: a.notified === true || verdict === 'escalate'\n  }) };\n});\n"
+      },
+      "id": "afada1fe-4b87-4d16-adcd-1fd17ea64ff6",
+      "name": "Decide",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3392,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.notify }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f929ceaa-6d87-4162-9330-ef496aa61bd0",
+      "name": "Escalate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4016,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all().map((i) => i.json);\nconst NL = String.fromCharCode(10);\nconst TICKS = String.fromCharCode(96, 96, 96);\nconst colour = (l) => (l >= 15 ? 0xE74C3C : 0xE67E22);\nconst head = (a) => '**' + a.description + '** (rule ' + a.rule_id + ', level ' + a.level + ') on ' + a.agent;\nif (items.length > 5) {\n  return [{ json: { embed: {\n    title: 'Wazuh: ' + items.length + ' alerts escalated',\n    color: colour(Math.max.apply(null, items.map((a) => a.level))),\n    description: items.slice(0, 25).map((a) => '- ' + head(a) + (a.summary ? ': ' + a.summary : '')).join(NL).slice(0, 4000),\n    footer: { text: 'Wazuh Triage' }, timestamp: new Date().toISOString()\n  } } }];\n}\nreturn items.map((a) => {\n  const f = [\n    { name: 'Agent', value: a.agent || '-', inline: true },\n    { name: 'Rule', value: a.rule_id + ' / level ' + a.level, inline: true },\n    { name: 'Events', value: String(a.batch) + (a.prev_count ? ' (+' + a.prev_count + ' in 24h)' : ''), inline: true }\n  ];\n  if (a.srcip) {\n    const t = a.intel_obj || {};\n    const parts = [];\n    if (t.abuse_score !== undefined) parts.push('AbuseIPDB ' + t.abuse_score + '% (' + (t.abuse_reports || 0) + ' reports)');\n    if (t.vt_malicious !== undefined) parts.push('VT ' + t.vt_malicious + ' malicious / ' + (t.vt_suspicious || 0) + ' suspicious');\n    if (t.gn_class) parts.push('GreyNoise ' + t.gn_class + (t.gn_riot ? ' (RIOT)' : ''));\n    if (t.otx_pulses !== undefined) parts.push('OTX ' + t.otx_pulses + ' pulses');\n    const who = [t.as_owner || t.isp, t.country].filter(Boolean).join(', ');\n    f.push({ name: 'Source IP', value: (a.srcip + (who ? ' (' + who + ')' : '') + (parts.length ? NL + parts.join(' | ') : '')).slice(0, 1024), inline: false });\n  }\n  if (a.watch && a.watch.length) f.unshift({ name: 'Watchlist hit', value: a.watch.join(NL).slice(0, 1024), inline: false });\n  if ((a.detection_ids || []).length || (a.cves || []).length) f.push({ name: 'Detections', value: ([].concat(a.detection_ids || []).join(', ') + ((a.detection_names || []).length ? ' (' + a.detection_names.join('; ') + ')' : '') + ((a.cves || []).length ? NL + a.cves.join(', ') : '')).slice(0, 1024) || '-', inline: false });\n  if (a.hp_outcome || a.hp_status) f.push({ name: 'Honeypot outcome', value: [a.hp_path, a.hp_status, a.hp_outcome].filter(Boolean).join(' | ').slice(0, 300), inline: true });\n  if (a.user) f.push({ name: 'User', value: a.user, inline: true });\n  if (a.path) f.push({ name: 'Path', value: a.path.slice(0, 200), inline: false });\n  if (a.cve) f.push({ name: 'CVE', value: a.cve, inline: true });\n  if (a.mitre) f.push({ name: 'MITRE', value: a.mitre + (a.tactics ? ' (' + a.tactics + ')' : ''), inline: true });\n  if (a.burst) f.push({ name: 'Burst', value: (a.burst + ' distinct entities, ' + a.burst_events + ' events: ' + a.burst_sample).slice(0, 1000), inline: false });\n  f.push({ name: 'Triage', value: ((a.fp_percent === null ? 'no LLM verdict' : a.fp_percent + '% FP') + '. ' + a.reason + (a.reasoning ? '. ' + a.reasoning : '')).slice(0, 1000), inline: false });\n  f.push({ name: 'Log', value: TICKS + String(a.log || '').slice(0, 900) + TICKS, inline: false });\n  return { json: { embed: {\n    title: ((a.watch && a.watch.length ? 'WATCH ' : '') + 'Wazuh: ' + a.description).slice(0, 250),\n    description: (a.summary || '').slice(0, 1000),\n    color: colour(a.level), fields: f,\n    footer: { text: 'Wazuh Triage | ' + a.fingerprint.slice(0, 120) }, timestamp: a.last\n  } } };\n});\n"
+      },
+      "id": "9d9fe141-c910-4fe0-8a1f-6faec3417b40",
+      "name": "Alert Embeds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4240,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "channelId": {
+          "__rl": true,
+          "cachedResultName": "n8n-alerts",
+          "mode": "list",
+          "value": "DISCORD_ALERTS_CHANNEL_ID"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "id": "f9f693cb-1a89-4058-ba50-352a345476ba",
+      "name": "Post Alert",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        4448,
+        16
+      ],
+      "webhookId": "06d7545a-05ea-445a-9db9-a83c2cfde70a",
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const q = $('Build Query').first().json;\nconst hits = (($input.first().json.hits || {}).hits) || [];\nlet st = Object.assign({}, q.prev || {});\ndelete st.force;\nif (hits.length) {\n  const last = hits[hits.length - 1]._source.timestamp;\n  const ids = hits.filter((h) => h._source.timestamp === last).map((h) => h._id);\n  const carry = last === st.ts ? (st.ids || []) : [];\n  st = { ts: last, ids: Array.from(new Set(carry.concat(ids))).slice(-500) };\n} else if (!st.ts) {\n  st = { ts: q.since, ids: [] };\n}\nreturn [{ json: { key: 'cursor', value: JSON.stringify(st) } }];\n"
+      },
+      "id": "8823eb6c-e0b9-49fc-9068-5510d0983aa5",
+      "name": "Next Cursor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_wazuh_state",
+          "cachedResultName": "wazuh_state"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "key",
+              "keyValue": "cursor"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "09d6bb55-4255-401c-8554-b008a088e0dc",
+      "name": "Save Cursor",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1104,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 8,
+              "triggerAtMinute": 5
+            }
+          ]
+        }
+      },
+      "id": "08b1efc5-3770-4e77-bba4-297a8bed4b5a",
+      "name": "Daily 08:05 Digest",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        832
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map((i) => i.json).filter((r) => r && r.fingerprint);\nif (!rows.length) return [];\nconst NL = String.fromCharCode(10);\nconst by = {};\nlet events = 0;\nfor (const r of rows) { const c = Number(r.count || 0); by[r.verdict] = (by[r.verdict] || 0) + c; events += c; }\nconst noisy = {};\nfor (const r of rows) {\n  if (r.verdict === 'escalate') continue;\n  const k = r.rule_id;\n  noisy[k] = noisy[k] || { rule: k, desc: r.description, events: 0, hint: '' };\n  noisy[k].events += Number(r.count || 0);\n  if (r.suppress_hint && !noisy[k].hint) noisy[k].hint = r.suppress_hint;\n}\nconst top = Object.values(noisy).sort((x, y) => y.events - x.events).slice(0, 10);\nconst esc = rows.filter((r) => r.verdict === 'escalate');\nconst fields = [{ name: 'Verdicts (events)', value: Object.keys(by).map((k) => k + ': ' + by[k]).join(NL) || '-', inline: true }];\nif (esc.length) fields.push({ name: 'Escalated', value: esc.slice(0, 10).map((r) => '- ' + r.rule_id + ' ' + String(r.description).slice(0, 60) + ' on ' + r.agent).join(NL).slice(0, 1024), inline: false });\nif (top.length) fields.push({ name: 'Noisiest rules (tune these)', value: top.map((t) => '- ' + t.rule + ' ' + String(t.desc).slice(0, 60) + ': ' + t.events + (t.hint ? NL + '  hint: ' + t.hint.slice(0, 120) : '')).join(NL).slice(0, 1024), inline: false });\nreturn [{ json: { embed: {\n  title: 'Wazuh triage: last 24h',\n  color: 0x3498DB,\n  description: events + ' high/critical events, ' + rows.length + ' unique. Escalated ' + esc.length + ' (' + (rows.length ? Math.round(100 * esc.length / rows.length) : 0) + '% of unique alerts).',\n  fields: fields, footer: { text: 'Wazuh Triage' }, timestamp: new Date().toISOString()\n} } }];\n"
+      },
+      "id": "71755d1d-dba7-431a-84fc-50339bcaf1a0",
+      "name": "Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        1280
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "channelId": {
+          "__rl": true,
+          "cachedResultName": "n8n-alerts",
+          "mode": "list",
+          "value": "DISCORD_ALERTS_CHANNEL_ID"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "id": "63a519ac-28ef-4c2d-bdb0-7ad5b27dbce4",
+      "name": "Post Digest",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        1280
+      ],
+      "webhookId": "1fc8f69b-76b5-48f0-816a-c0397ceda019",
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "cachedResultName": "IP Threat Intel",
+          "mode": "id",
+          "value": "eu0VVUdYxslIgEeb"
+        },
+        "workflowInputs": {
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false,
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "schema": [
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "ipAddress",
+              "id": "ipAddress",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "value": {
+            "ipAddress": "={{ $json.srcip }}"
+          }
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "d9f83a1e-8242-4a8a-af18-613411082221",
+      "name": "IP Threat Intel",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2688,
+        80
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $('External Source IP?').all(0).map((i) => i.json);\nconst res = $input.all();\nconst groups = src.map(() => []);\nconst ipOf = (j) => { const d = j.data || {}; return d.ipAddress || (d.type === 'ip_address' ? d.id : '') || j.ip || j.indicator || ''; };\nres.forEach((it, n) => {\n  const j = it.json || {};\n  const ip = ipOf(j);\n  let idx = ip ? src.findIndex((a) => a.srcip === ip) : -1;\n  if (idx < 0 && src.length === 1) idx = 0;\n  if (idx >= 0) groups[idx].push(j);\n});\nreturn src.map((a, idx) => {\n  const ti = { sources: [] };\n  for (const j of groups[idx]) {\n    const d = j.data;\n    if (d && d.abuseConfidenceScore !== undefined) {\n      Object.assign(ti, { abuse_score: d.abuseConfidenceScore, abuse_reports: d.totalReports, isp: d.isp, country: d.countryCode, usage: d.usageType, whitelisted: d.isWhitelisted, tor: d.isTor });\n      ti.sources.push('abuseipdb');\n    } else if (d && d.type === 'ip_address') {\n      const at = d.attributes || {};\n      const s = at.last_analysis_stats || {};\n      Object.assign(ti, { vt_malicious: s.malicious || 0, vt_suspicious: s.suspicious || 0, vt_reputation: at.reputation, as_owner: at.as_owner, vt_tags: (at.tags || []).slice(0, 5) });\n      if (!ti.country && at.country) ti.country = at.country;\n      ti.sources.push('virustotal');\n    } else if (j.pulse_info) {\n      ti.otx_pulses = j.pulse_info.count || 0;\n      ti.otx_validation = (j.validation || []).map((v) => v.name || v.source).filter(Boolean).slice(0, 3);\n      ti.sources.push('otx');\n    } else if (j.noise !== undefined || j.riot !== undefined || j.classification) {\n      Object.assign(ti, { gn_noise: j.noise, gn_riot: j.riot, gn_class: j.classification || (j.noise ? 'unknown' : 'not observed'), gn_name: j.name });\n      ti.sources.push('greynoise');\n    } else if (j.error) {\n      const m = String((j.error && j.error.message) || j.error);\n      if (/404/.test(m)) { ti.gn_class = ti.gn_class || 'not observed'; ti.sources.push('greynoise'); }\n      else ti.errors = (ti.errors || []).concat(m.slice(0, 80));\n    }\n  }\n  return { json: Object.assign({}, a, { ti: ti }), pairedItem: { item: idx } };\n});\n"
+      },
+      "id": "7452e25d-33cb-43f6-9760-b703dca17dd4",
+      "name": "Summarise Intel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2832,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT fingerprint, srcip, count, verdict, first_seen, last_seen, notified, fp_percent, summary, intel, suppress_hint FROM wazuh_alerts WHERE last_seen >= now() - interval '24 hours';",
+        "options": {}
+      },
+      "id": "0982ef2a-f09b-4153-b24e-cf36f0dad441",
+      "name": "Get Recent Fingerprints",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1328,
+        208
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO wazuh_alerts AS w (fingerprint, rule_id, level, description, agent, srcip, \"user\", groups, first_seen, last_seen, count, verdict, reason, fp_percent, summary, intel, suppress_hint, notified, sample_id)\nSELECT fingerprint, rule_id, level, description, agent, srcip, \"user\", groups, first_seen, last_seen, COALESCE(count, 1), verdict, reason, fp_percent, summary, intel, suppress_hint, COALESCE(notified, false), sample_id\nFROM jsonb_to_recordset($1::jsonb) AS r(fingerprint text, rule_id text, level int, description text, agent text, srcip text, \"user\" text, groups text, first_seen timestamptz, last_seen timestamptz, count int, verdict text, reason text, fp_percent int, summary text, intel text, suppress_hint text, notified boolean, sample_id text)\nON CONFLICT (fingerprint) DO UPDATE SET\n  rule_id = EXCLUDED.rule_id, level = EXCLUDED.level, description = EXCLUDED.description, agent = EXCLUDED.agent,\n  srcip = EXCLUDED.srcip, \"user\" = EXCLUDED.\"user\", groups = EXCLUDED.groups,\n  first_seen = LEAST(w.first_seen, EXCLUDED.first_seen),\n  last_seen = GREATEST(w.last_seen, EXCLUDED.last_seen),\n  count = w.count + EXCLUDED.count,\n  verdict = EXCLUDED.verdict, reason = EXCLUDED.reason,\n  fp_percent = COALESCE(EXCLUDED.fp_percent, w.fp_percent),\n  summary = COALESCE(NULLIF(EXCLUDED.summary, ''), w.summary),\n  intel = COALESCE(NULLIF(EXCLUDED.intel, ''), w.intel),\n  suppress_hint = COALESCE(NULLIF(EXCLUDED.suppress_hint, ''), w.suppress_hint),\n  notified = w.notified OR EXCLUDED.notified,\n  sample_id = EXCLUDED.sample_id;",
+        "options": {
+          "queryReplacement": "={{ [$json.rows] }}"
+        }
+      },
+      "id": "8d61b314-75f1-4e8d-8006-9b2733905928",
+      "name": "Record Alert",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        4944,
+        560
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM wazuh_alerts WHERE last_seen < now() - interval '90 days';",
+        "options": {}
+      },
+      "id": "cb57b10d-e8b9-430b-8c18-329692ab4b28",
+      "name": "Prune Old Alerts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        432,
+        960
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT fingerprint, rule_id, description, agent, verdict, count, suppress_hint FROM wazuh_alerts WHERE last_seen >= now() - interval '24 hours';",
+        "options": {}
+      },
+      "id": "de28c5c4-8f92-4e62-accc-dbe79c8d957f",
+      "name": "Get Last 24h",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        656,
+        960
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "cachedResultName": "wazuh_watch",
+          "mode": "id",
+          "value": "DATA_TABLE_wazuh_watch"
+        },
+        "returnAll": true
+      },
+      "id": "0a9d669c-fd15-4993-b9e1-33b4b83cbf47",
+      "name": "Get Watchlist",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        336,
+        464
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Get Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Now": {
+      "main": [
+        [
+          {
+            "node": "Get Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Query": {
+      "main": [
+        [
+          {
+            "node": "Search Alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Alerts": {
+      "main": [
+        [
+          {
+            "node": "Normalise",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Next Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise": {
+      "main": [
+        [
+          {
+            "node": "Get Suppress Rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify": {
+      "main": [
+        [
+          {
+            "node": "Needs Triage?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Triage?": {
+      "main": [
+        [
+          {
+            "node": "External Source IP?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "To Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "External Source IP?": {
+      "main": [
+        [
+          {
+            "node": "IP Threat Intel",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Attach Intel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Intel": {
+      "main": [
+        [
+          {
+            "node": "LLM Triage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Triage": {
+      "main": [
+        [
+          {
+            "node": "Decide",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide": {
+      "main": [
+        [
+          {
+            "node": "Escalate?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "To Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate?": {
+      "main": [
+        [
+          {
+            "node": "Alert Embeds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert Embeds": {
+      "main": [
+        [
+          {
+            "node": "Post Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Next Cursor": {
+      "main": [
+        [
+          {
+            "node": "Save Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Digest": {
+      "main": [
+        [
+          {
+            "node": "Post Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IP Threat Intel": {
+      "main": [
+        [
+          {
+            "node": "Summarise Intel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarise Intel": {
+      "main": [
+        [
+          {
+            "node": "Attach Intel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Suppress Rules": {
+      "main": [
+        [
+          {
+            "node": "Get Recent Fingerprints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Recent Fingerprints": {
+      "main": [
+        [
+          {
+            "node": "Classify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "To Row": {
+      "main": [
+        [
+          {
+            "node": "Record Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily 08:05 Digest": {
+      "main": [
+        [
+          {
+            "node": "Prune Old Alerts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prune Old Alerts": {
+      "main": [
+        [
+          {
+            "node": "Get Last 24h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Last 24h": {
+      "main": [
+        [
+          {
+            "node": "Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Cursor": {
+      "main": [
+        [
+          {
+            "node": "Get Watchlist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Watchlist": {
+      "main": [
+        [
+          {
+            "node": "Build Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "errorWorkflow": "oTbFYlbhb8Dlg0CM",
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [
+    {
+      "id": "4c2fe40e-fac2-497a-873c-3299a5ea1732",
+      "name": "Dedupe and suppress",
+      "nodeIds": [
+        "e10aecee-6655-440e-b65d-42824fb796b1",
+        "84c2d0a9-86bd-4efb-9070-c7a6b7c6f262",
+        "0982ef2a-f09b-4153-b24e-cf36f0dad441",
+        "db196a49-d569-4f19-bc12-8baf11361f5f"
+      ],
+      "description": "Fingerprint alerts, apply wazuh_suppress rules, skip repeats (Postgres wazuh_alerts), collapse bursts."
+    },
+    {
+      "id": "ad5f9d5c-bfa4-491a-a685-d628dea669cf",
+      "name": "Enrich and LLM triage",
+      "nodeIds": [
+        "1fb2bccd-4eff-442a-84ca-8d38cb98c4b3",
+        "d9f83a1e-8242-4a8a-af18-613411082221",
+        "7452e25d-33cb-43f6-9760-b703dca17dd4",
+        "0ad92131-df54-4c00-96e4-4a0fee536fb1",
+        "289d5ec0-9c01-4fe4-b9c8-222453542477",
+        "afada1fe-4b87-4d16-adcd-1fd17ea64ff6"
+      ],
+      "description": "IP Threat Intel for new external IPs (4 per poll, 24h cache), Ollama FP score, verdict rules."
+    },
+    {
+      "id": "364fbf1e-1dfd-4198-88ee-7584cf0e2629",
+      "name": "Escalate",
+      "nodeIds": [
+        "f929ceaa-6d87-4162-9330-ef496aa61bd0",
+        "9d9fe141-c910-4fe0-8a1f-6faec3417b40",
+        "f9f693cb-1a89-4058-ba50-352a345476ba"
+      ],
+      "description": "Discord only for escalate verdicts."
+    },
+    {
+      "id": "5c60266d-aa2e-4028-96f5-f73c28e49ba8",
+      "name": "Record",
+      "nodeIds": [
+        "2e46ed49-8002-4ec2-9215-6a69702269a9",
+        "8d61b314-75f1-4e8d-8006-9b2733905928"
+      ],
+      "description": "Atomic upsert per fingerprint into Postgres wazuh_alerts."
+    },
+    {
+      "id": "07b08d63-43f3-466e-a68a-f83a97114a20",
+      "name": "Advance cursor",
+      "nodeIds": [
+        "8823eb6c-e0b9-49fc-9068-5510d0983aa5",
+        "09d6bb55-4255-401c-8554-b008a088e0dc"
+      ],
+      "description": "Runs last; only advances after processing succeeds."
+    },
+    {
+      "id": "e2b179a6-3edf-4fbf-86d6-9e8ff2152edb",
+      "name": "Daily digest",
+      "nodeIds": [
+        "cb57b10d-e8b9-430b-8c18-329692ab4b28",
+        "de28c5c4-8f92-4e62-accc-dbe79c8d957f",
+        "71755d1d-dba7-431a-84fc-50339bcaf1a0",
+        "63a519ac-28ef-4c2d-bdb0-7ad5b27dbce4"
+      ],
+      "description": "Prune rows older than 90 days, then verdict counts and noisiest rules."
+    }
+  ],
+  "sourceWorkflowId": null,
+  "tags": []
+}

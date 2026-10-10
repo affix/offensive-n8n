@@ -1,0 +1,195 @@
+{
+  "id": "3QsKdG7akjn45ZeQ",
+  "name": "Wazuh · Rewind To Last N",
+  "description": "Rewinds the Alert Triage cursor so the next poll re-processes the last N level 12+ alerts (vulnerability-detector excluded). Set N in Build Query.",
+  "active": false,
+  "nodes": [
+    {
+      "id": "3817729e-044c-497b-9520-f4ea3e0a1f0d",
+      "name": "Go",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "69e0e016-938c-49b9-af10-9eb2091f0c06",
+      "name": "Build Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const N = 20;\nreturn [{ json: { body: {\n  size: N,\n  sort: [{ timestamp: { order: 'desc' } }],\n  query: { bool: { filter: [{ range: { 'rule.level': { gte: 12 } } }], must_not: [{ terms: { 'rule.groups': ['vulnerability-detector'] } }] } },\n  _source: ['timestamp', 'rule.id', 'rule.level', 'rule.description', 'agent.name', 'data.srcip']\n} } }];\n"
+      }
+    },
+    {
+      "id": "34b63255-ac31-44b7-a251-4c370092dd72",
+      "name": "Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://WAZUH_INDEXER:9200/wazuh-alerts-4.x-*/_search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "Wazuh Opensearch"
+        }
+      }
+    },
+    {
+      "id": "24e5cfeb-3f42-4974-b491-ccee55610321",
+      "name": "Rewind Cursor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const hits = (($input.first().json.hits || {}).hits) || [];\nif (!hits.length) throw new Error('No matching alerts found');\nconst oldest = hits[hits.length - 1]._source.timestamp;\nconst list = hits.map((h) => { const s = h._source; return s.timestamp + ' L' + s.rule.level + ' ' + s.rule.id + ' ' + (s.agent || {}).name + ' ' + ((s.data || {}).srcip || '') + ' ' + s.rule.description; });\nreturn [{ json: { key: 'cursor', value: JSON.stringify({ ts: oldest, ids: [], force: true }), count: hits.length, alerts: list } }];\n"
+      }
+    },
+    {
+      "id": "a38c3d68-06eb-4cf1-acfd-917d71554054",
+      "name": "Cursor Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const r = $input.first().json;\nreturn [{ json: { key: r.key, value: r.value } }];\n"
+      }
+    },
+    {
+      "id": "a11edcc9-2e76-4dc5-9b95-69cf081db9d5",
+      "name": "Save Cursor",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        0
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_wazuh_state",
+          "cachedResultName": "wazuh_state"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "key",
+              "condition": "eq",
+              "keyValue": "cursor"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Go": {
+      "main": [
+        [
+          {
+            "node": "Build Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Query": {
+      "main": [
+        [
+          {
+            "node": "Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search": {
+      "main": [
+        [
+          {
+            "node": "Rewind Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rewind Cursor": {
+      "main": [
+        [
+          {
+            "node": "Cursor Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cursor Row": {
+      "main": [
+        [
+          {
+            "node": "Save Cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

@@ -1,0 +1,158 @@
+{
+  "id": "cQKlLmHvZKJn3qH6",
+  "name": "ASM · 06 Vuln Checks",
+  "description": "Stage 6: on the Diff delta only. nuclei (medium+), ffuf sensitive paths, katana crawl; nuclei DAST and dalfox only when allow_intrusive. Writes findings/vuln.jsonl.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "75336a37-6ec0-4c12-8141-e0a6f0a1d704",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "f0d6445d-f756-4b88-ba89-c124a21ae8ab",
+      "name": "Build Vuln Checks Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STAGE = 'vuln';\nconst MAX_MINUTES = 360;\nconst BODY = \"DF=\\\"$R/diff\\\"\\nmkdir -p \\\"$R/findings\\\" ffuf\\npython3 - \\\"$R\\\" <<'PY'\\nimport ipaddress, sys\\nfrom pathlib import Path\\nfrom urllib.parse import urlsplit\\nR = Path(sys.argv[1])\\nread = lambda p: [l.strip() for l in p.read_text().splitlines() if l.strip()] if p.exists() else []\\nips = set(read(R / \\\"discovery/ips.txt\\\"))\\nservice = {l.split(\\\"\\\\t\\\")[0] for l in read(R / \\\"discovery/shared_hosts.txt\\\") if \\\"\\\\tservice\\\" in l}\\n\\ndef allowed(t):\\n    host = urlsplit(t if \\\"://\\\" in t else \\\"//\\\" + t).hostname or \\\"\\\"\\n    try:\\n        ipaddress.ip_address(host)\\n        return host in ips\\n    except ValueError:\\n        return host not in service\\n\\nweb = [t for t in read(R / \\\"diff/delta_web.txt\\\") if allowed(t)]\\nnet = [t for t in read(R / \\\"diff/delta_net.txt\\\") if allowed(t)]\\ndropped = len(read(R / \\\"diff/delta_web.txt\\\")) + len(read(R / \\\"diff/delta_net.txt\\\")) - len(web) - len(net)\\nPath(\\\"nuclei_targets.txt\\\").write_text(\\\"\\\".join(f\\\"{t}\\\\n\\\" for t in sorted(set(web + net))))\\nPath(\\\"web_targets.txt\\\").write_text(\\\"\\\".join(f\\\"{t}\\\\n\\\" for t in web[:200]))\\nPath(\\\"dropped_shared.txt\\\").write_text(f\\\"{dropped}\\\\n\\\")\\nPY\\ntouch nuclei_targets.txt web_targets.txt\\nETAGS=\\\"dos,fuzz\\\"\\n[ \\\"$INTRUSIVE\\\" = 1 ] || ETAGS=\\\"$ETAGS,intrusive\\\"\\n\\n: > nuclei.jsonl\\nif [ -s nuclei_targets.txt ]; then\\n  timeout 180m nuclei -l nuclei_targets.txt -severity medium,high,critical \\\\\\n    -tags cve,exposure,misconfig,default-login,takeover -etags \\\"$ETAGS\\\" \\\\\\n    -rl \\\"$RATE\\\" -c 10 -bs 10 -dr -jsonl -o nuclei.jsonl -silent -nc -duc >/dev/null 2>nuclei.log || true\\n  touch nuclei.jsonl\\nfi\\n\\ncat > paths.txt <<'EOF'\\n.git/config\\n.git/HEAD\\n.svn/entries\\n.hg/hgrc\\n.env\\n.env.bak\\n.env.local\\n.env.production\\n.DS_Store\\n.aws/credentials\\n.ssh/id_rsa\\nid_rsa\\nconfig.json\\nconfig.php.bak\\nwp-config.php.bak\\nweb.config\\n.htpasswd\\ndocker-compose.yml\\nbackup.zip\\nbackup.tar.gz\\ndb.sql\\ndump.sql\\nserver-status\\nserver-info\\nphpinfo.php\\nactuator\\nactuator/env\\nactuator/heapdump\\nactuator/mappings\\ntrace.axd\\nelmah.axd\\nswagger.json\\nopenapi.json\\nv2/api-docs\\nv3/api-docs\\nswagger-ui.html\\ngraphql\\ndebug\\nconsole\\n_profiler\\nEOF\\n\\ni=0\\nwhile read -r u; do\\n  i=$((i + 1))\\n  base=\\\"${u%/}\\\"\\n  timeout 5m ffuf -u \\\"$base/FUZZ\\\" -w paths.txt -ac -mc 200 -t 5 -rate \\\"$RATE\\\" -timeout 10 -s \\\\\\n    -of json -o \\\"ffuf/$i.json\\\" >/dev/null 2>>ffuf.log || true\\ndone < web_targets.txt\\n\\n: > katana.jsonl\\nif [ -s web_targets.txt ]; then\\n  timeout 60m katana -list web_targets.txt -fs fqdn -or -ob -jc -d 2 -ct 300 -rl \\\"$RATE\\\" -silent -nc -jsonl -o katana.jsonl \\\\\\n    -ef png,jpg,jpeg,gif,svg,css,woff,woff2,ttf,eot,ico,mp4,webp,pdf >/dev/null 2>katana.log || true\\n  touch katana.jsonl\\nfi\\n\\npython3 - \\\"$R/scope/scope.py\\\" <<'PY' > params.txt\\nimport json, sys\\nfrom urllib.parse import urlsplit, parse_qsl\\nsys.path.insert(0, sys.argv[1].rsplit(\\\"/\\\", 1)[0])\\nfrom scope import name_ok, ip_ok\\nseen, out = set(), []\\nfor line in open(\\\"katana.jsonl\\\"):\\n    try:\\n        u = (json.loads(line).get(\\\"request\\\") or {}).get(\\\"endpoint\\\", \\\"\\\")\\n    except ValueError:\\n        continue\\n    p = urlsplit(u)\\n    if not p.query or not (name_ok(p.hostname or \\\"\\\") or ip_ok(p.hostname or \\\"\\\")):\\n        continue\\n    key = (p.scheme, p.netloc, p.path, tuple(sorted(k for k, _ in parse_qsl(p.query))))\\n    if key in seen:\\n        continue\\n    seen.add(key)\\n    out.append(u)\\nprint(\\\"\\\\n\\\".join(out[:300]))\\nPY\\n[ -s katana.jsonl ] && gzip -f katana.jsonl\\n\\n: > nuclei_dast.jsonl\\n: > dalfox.json\\nif [ \\\"$INTRUSIVE\\\" = 1 ] && [ -s params.txt ]; then\\n  timeout 90m nuclei -l params.txt -dast -severity medium,high,critical -rl \\\"$RATE\\\" -c 10 \\\\\\n    -dr -jsonl -o nuclei_dast.jsonl -silent -nc -duc >/dev/null 2>nuclei_dast.log || true\\n  timeout 90m docker run --rm -i --user \\\"$(id -u):$(id -g)\\\" -e HOME=/tmp -v \\\"$S:/w\\\" -w /w \\\\\\n    hahwul/dalfox:v2.12.0 file /w/params.txt --silence --no-color --skip-bav --worker 5 \\\\\\n    --format json -o /w/dalfox.json >/dev/null 2>dalfox.log || true\\n  touch nuclei_dast.jsonl dalfox.json\\nfi\\n\\npython3 - \\\"$ENG\\\" \\\"$R/findings/vuln.jsonl\\\" \\\"$S\\\" <<'PY'\\nimport glob, json, sys\\nfrom urllib.parse import urlsplit\\neng, dst, evid = sys.argv[1:4]\\nHIGH = (\\\".git/\\\", \\\".svn/\\\", \\\".hg/\\\", \\\".env\\\", \\\".aws/\\\", \\\"id_rsa\\\", \\\".ssh/\\\", \\\"heapdump\\\", \\\"actuator/env\\\", \\\".htpasswd\\\", \\\"dump.sql\\\", \\\"db.sql\\\", \\\"backup.\\\")\\nLOW = (\\\"swagger\\\", \\\"api-docs\\\", \\\"openapi\\\", \\\"graphql\\\", \\\"_profiler\\\", \\\"console\\\", \\\"debug\\\")\\nout, seen = [], set()\\n\\ndef host_of(u):\\n    h = urlsplit(u if \\\"://\\\" in u else \\\"//\\\" + u).hostname\\n    return (h or \\\"\\\").lower()\\n\\ndef add(rec):\\n    if rec[\\\"finding_key\\\"] in seen:\\n        return\\n    seen.add(rec[\\\"finding_key\\\"])\\n    rec[\\\"evidence_dir\\\"] = evid\\n    out.append(rec)\\n\\nfor src in (\\\"nuclei.jsonl\\\", \\\"nuclei_dast.jsonl\\\"):\\n    for line in open(src):\\n        try:\\n            f = json.loads(line)\\n        except ValueError:\\n            continue\\n        info = f.get(\\\"info\\\") or {}\\n        m = f.get(\\\"matched-at\\\") or f.get(\\\"host\\\", \\\"\\\")\\n        tid = f.get(\\\"template-id\\\", \\\"\\\")\\n        detail = \\\" \\\".join(x for x in [info.get(\\\"description\\\", \\\"\\\"), \\\"extracted: \\\" + \\\", \\\".join(f.get(\\\"extracted-results\\\") or []) if f.get(\\\"extracted-results\\\") else \\\"\\\", \\\"matcher: \\\" + f[\\\"matcher-name\\\"] if f.get(\\\"matcher-name\\\") else \\\"\\\"] if x)\\n        add({\\\"finding_key\\\": f\\\"{eng}|nuclei|{tid}|{m}\\\", \\\"source\\\": \\\"nuclei-dast\\\" if \\\"dast\\\" in src else \\\"nuclei\\\",\\n             \\\"host\\\": host_of(m), \\\"url\\\": m, \\\"template_id\\\": tid, \\\"name\\\": info.get(\\\"name\\\", tid),\\n             \\\"severity\\\": info.get(\\\"severity\\\", \\\"unknown\\\"), \\\"matched_at\\\": m, \\\"detail\\\": detail[:600]})\\n\\nfor path in glob.glob(\\\"ffuf/*.json\\\"):\\n    try:\\n        data = json.load(open(path))\\n    except ValueError:\\n        continue\\n    for r in data.get(\\\"results\\\") or []:\\n        word = (r.get(\\\"input\\\") or {}).get(\\\"FUZZ\\\", \\\"\\\")\\n        url = r.get(\\\"url\\\", \\\"\\\")\\n        sev = \\\"high\\\" if any(x in word for x in HIGH) else \\\"low\\\" if any(x in word for x in LOW) else \\\"medium\\\"\\n        base = url[: -len(word)] if word and url.endswith(word) else url\\n        add({\\\"finding_key\\\": f\\\"{eng}|ffuf|{word}|{base}\\\", \\\"source\\\": \\\"ffuf\\\", \\\"host\\\": host_of(url), \\\"url\\\": url,\\n             \\\"template_id\\\": f\\\"exposed-path:{word}\\\", \\\"name\\\": f\\\"Exposed path /{word}\\\", \\\"severity\\\": sev,\\n             \\\"matched_at\\\": url, \\\"detail\\\": f\\\"HTTP {r.get('status')} length {r.get('length')} words {r.get('words')}\\\"})\\n\\ntry:\\n    raw = open(\\\"dalfox.json\\\").read().strip()\\n    items = json.loads(raw) if raw.startswith(\\\"[\\\") else [json.loads(l) for l in raw.splitlines() if l.strip().startswith(\\\"{\\\")]\\nexcept ValueError:\\n    items = []\\nfor d in items:\\n    if not isinstance(d, dict) or not d.get(\\\"type\\\"):\\n        continue\\n    poc = d.get(\\\"data\\\") or d.get(\\\"poc\\\") or \\\"\\\"\\n    param = d.get(\\\"param\\\", \\\"\\\")\\n    base = poc.split(\\\"?\\\")[0]\\n    add({\\\"finding_key\\\": f\\\"{eng}|dalfox|{param}|{base}\\\", \\\"source\\\": \\\"dalfox\\\", \\\"host\\\": host_of(poc), \\\"url\\\": poc,\\n         \\\"template_id\\\": f\\\"dalfox-{d.get('type')}\\\", \\\"name\\\": f\\\"Reflected XSS ({d.get('type')}) in {param}\\\",\\n         \\\"severity\\\": (d.get(\\\"severity\\\") or \\\"medium\\\").lower(), \\\"matched_at\\\": poc,\\n         \\\"detail\\\": f\\\"{d.get('method', '')} {d.get('inject_type', '')} {d.get('message_str', '')}\\\"[:600]})\\n\\nwith open(dst, \\\"w\\\") as fh:\\n    for o in out:\\n        fh.write(json.dumps(o) + \\\"\\\\n\\\")\\ncounts = {}\\nfor o in out:\\n    counts[o[\\\"source\\\"]] = counts.get(o[\\\"source\\\"], 0) + 1\\njson.dump({\\\"vuln_findings\\\": len(out), \\\"by_source\\\": counts}, open(\\\"result.json\\\", \\\"w\\\"))\\nPY\\n\";\nconst c = $input.first().json;\nconst SAFE = /^[A-Za-z0-9_.\\/:-]+$/;\nconst q = (k) => {\n  const v = String(c[k] ?? '');\n  if (!SAFE.test(v)) throw new Error(`Unsafe or missing context value for ${k}: ${v}`);\n  return `'${v}'`;\n};\nconst int = (v, lo, hi, d) => Math.min(Math.max(parseInt(v ?? d, 10) || d, lo), hi);\nconst header = [\n  '#!/usr/bin/env bash',\n  'set -uo pipefail',\n  `R=${q('run_dir')}`,\n  `S=${q('run_dir').slice(0, -1)}/${STAGE}'`,\n  `ENG=${q('engagement')}`,\n  `RUN_ID=${q('run_id')}`,\n  `STATE=${q('state_dir')}`,\n  `RATE=${int(c.rate, 1, 500, 50)}`,\n  `PORT_RATE=${int(c.port_rate, 50, 2000, 500)}`,\n  `INTRUSIVE=${c.intrusive === true ? 1 : 0}`,\n  `PERMUTE=${c.permute === true ? 1 : 0}`,\n  'mkdir -p \"$S\" && cd \"$S\" || exit 1',\n  ''\n].join('\\n');\nreturn [{ json: { job_dir: `${c.run_dir}/${STAGE}`, script: header + BODY, max_minutes: MAX_MINUTES } }];\n"
+      }
+    },
+    {
+      "id": "65fbe890-6b37-4536-9134-1b717632becd",
+      "name": "Run Vuln Checks",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "QptyXc2oFNL8f8gX",
+          "cachedResultName": "ASM · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "b8b35908-c80a-43d2-a5f3-206afc54dad2",
+      "name": "Return Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst r = $input.first().json;\nconst stages = { ...(ctx.stages ?? {}), vuln: { ...(r.result ?? {}), rc: r.rc, timed_out: r.timed_out } };\nreturn [{ json: { ...ctx, stages } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Build Vuln Checks Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Vuln Checks Script": {
+      "main": [
+        [
+          {
+            "node": "Run Vuln Checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Vuln Checks": {
+      "main": [
+        [
+          {
+            "node": "Return Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

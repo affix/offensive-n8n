@@ -1,0 +1,555 @@
+{
+  "id": "EkqKNwqoMzw0Cdby",
+  "name": "ASM · 08 Findings & Alerts",
+  "description": "Collects findings/*.jsonl for the run, keeps only keys not already in asm_findings, triages via Ollama, records them, and alerts Discord per host (medium+ or takeover).",
+  "active": true,
+  "nodes": [
+    {
+      "id": "110ea6ab-4a69-4ee9-a922-19480a5bf070",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "7218ece7-72d7-45a9-96f6-f2ad3a0e261b",
+      "name": "Read Findings",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        220,
+        400
+      ],
+      "parameters": {
+        "executeOnce": true,
+        "command": "=D='{{ $json.run_dir }}/findings'\ncase \"$D\" in /opt/loot/asm/*/*/findings) ;; *) echo 'bad path' >&2; exit 1;; esac\nif ls \"$D\"/*.jsonl >/dev/null 2>&1; then cat \"$D\"/*.jsonl | jq -s -c 'map(select(.finding_key)) | unique_by(.finding_key) | .[:500]'; else echo '[]'; fi"
+      }
+    },
+    {
+      "id": "bae5dd65-a92f-4ba8-9c3e-3aa6c47f82b7",
+      "name": "Load Known Findings",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        400
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_findings",
+          "cachedResultName": "asm_findings"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "engagement",
+              "condition": "eq",
+              "keyValue": "={{ $('When Called').first().json.engagement }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "2108083d-bf38-41fa-a839-dd6348893cbc",
+      "name": "New Findings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        400
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nlet all = [];\ntry {\n  all = JSON.parse($('Read Findings').first().json.stdout || '[]');\n} catch (e) {\n  throw new Error(`Findings file did not parse: ${e.message}`);\n}\nconst known = new Set($input.all().map((i) => i.json.finding_key).filter(Boolean));\nconst fresh = all.filter((f) => f.finding_key && !known.has(f.finding_key));\nreturn [{ json: { engagement: ctx.engagement, run_id: ctx.run_id, total: all.length, findings: fresh } }];\n"
+      }
+    },
+    {
+      "id": "3ddb5d0f-d971-43bf-9bad-6936c7372bc6",
+      "name": "Any New Findings?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.findings.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "8d5e77eb-520a-4278-b777-d871b0871fb0",
+      "name": "Triage Findings",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1100,
+        120
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "nQ5IKz2tZ8T66G58",
+          "cachedResultName": "ASM · 07 Triage (Ollama)"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "288369df-46bb-4dea-adcb-a5a77c3af4cd",
+      "name": "Finding Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        120
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const nf = $('New Findings').first().json;\nconst t = $input.first().json?.triage ?? {};\nconst now = new Date().toISOString();\nreturn nf.findings.map((f) => {\n  const tr = t[f.finding_key] ?? { fp_likelihood: null, note: 'not triaged (over per-run cap)' };\n  return { json: {\n    finding_key: f.finding_key,\n    engagement: nf.engagement,\n    run_id: nf.run_id,\n    source: f.source || '',\n    host: f.host || '',\n    url: String(f.url || '').slice(0, 1000),\n    template_id: f.template_id || '',\n    name: String(f.name || '').slice(0, 300),\n    severity: String(f.severity || 'unknown').toLowerCase(),\n    matched_at: String(f.matched_at || '').slice(0, 1000),\n    evidence_dir: f.evidence_dir || '',\n    status: 'new',\n    triage_fp_likelihood: tr.fp_likelihood,\n    triage_note: tr.note,\n    detail: String(f.detail || '').slice(0, 600),\n    seen_at: now\n  } };\n});\n"
+      }
+    },
+    {
+      "id": "6bfcea25-1551-4ac0-b4e1-6655bf504bdc",
+      "name": "Record Finding",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        40
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_findings",
+          "cachedResultName": "asm_findings"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "finding_key": "={{ $json.finding_key }}",
+            "engagement": "={{ $json.engagement }}",
+            "run_id": "={{ $json.run_id }}",
+            "source": "={{ $json.source }}",
+            "host": "={{ $json.host }}",
+            "url": "={{ $json.url }}",
+            "template_id": "={{ $json.template_id }}",
+            "name": "={{ $json.name }}",
+            "severity": "={{ $json.severity }}",
+            "matched_at": "={{ $json.matched_at }}",
+            "evidence_dir": "={{ $json.evidence_dir }}",
+            "status": "={{ $json.status }}",
+            "triage_fp_likelihood": "={{ $json.triage_fp_likelihood }}",
+            "triage_note": "={{ $json.triage_note }}",
+            "first_seen": "={{ $json.seen_at }}",
+            "last_seen": "={{ $json.seen_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "finding_key",
+              "displayName": "finding_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "engagement",
+              "displayName": "engagement",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "run_id",
+              "displayName": "run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "host",
+              "displayName": "host",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "url",
+              "displayName": "url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "template_id",
+              "displayName": "template_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "name",
+              "displayName": "name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "severity",
+              "displayName": "severity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "matched_at",
+              "displayName": "matched_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "evidence_dir",
+              "displayName": "evidence_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "triage_fp_likelihood",
+              "displayName": "triage_fp_likelihood",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "triage_note",
+              "displayName": "triage_note",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "first_seen",
+              "displayName": "first_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "last_seen",
+              "displayName": "last_seen",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "20e6be06-8c76-43ad-8529-d53e657b625f",
+      "name": "Alert Embeds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        220
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const RANK = { critical: 4, high: 3, medium: 2, low: 1, info: 0, unknown: -1 };\nconst COLOUR = { critical: 0x9B111E, high: 0xE74C3C, medium: 0xF39C12, low: 0x3498DB, info: 0x95A5A6, unknown: 0x7F8C8D };\nconst MAX_HOSTS = 20;\nconst cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };\nconst code = (s) => '`' + String(s).replace(/`/g, \"'\") + '`';\nconst title = (s) => s.charAt(0).toUpperCase() + s.slice(1);\n\nconst alertable = $input.all().map((i) => i.json)\n  .filter((f) => (RANK[f.severity] ?? -1) >= RANK.medium || f.source === 'takeover');\n\nconst hosts = new Map();\nfor (const f of alertable) {\n  const h = f.host || 'unknown-host';\n  if (!hosts.has(h)) hosts.set(h, []);\n  hosts.get(h).push(f);\n}\n\nconst ranked = [...hosts.entries()]\n  .map(([host, fs]) => ({ host, fs, worst: fs.reduce((w, f) => ((RANK[f.severity] ?? -1) > (RANK[w] ?? -1) ? f.severity : w), 'unknown') }))\n  .sort((a, b) => (RANK[b.worst] ?? -1) - (RANK[a.worst] ?? -1));\n\nreturn ranked.slice(0, MAX_HOSTS).map(({ host, fs, worst }) => {\n  const f0 = fs[0];\n  const lines = fs\n    .sort((a, b) => (RANK[b.severity] ?? -1) - (RANK[a.severity] ?? -1))\n    .slice(0, 8)\n    .map((f) => `• **${cut(f.name || f.template_id, 70)}** · ${title(f.severity)} · ${f.source}\\n  ${code(cut(f.matched_at || f.url, 150))}`)\n    .join('\\n');\n  const notes = fs\n    .filter((f) => f.triage_note && !/^(triage unavailable|triage output unparseable|not triaged)/.test(f.triage_note))\n    .slice(0, 4)\n    .map((f) => `• ${cut(f.template_id, 40)}: ${cut(f.triage_note, 160)}${f.triage_fp_likelihood != null ? ` (FP ${f.triage_fp_likelihood}%)` : ''}`)\n    .join('\\n');\n  const fields = [\n    { name: 'Engagement', value: code(f0.engagement), inline: true },\n    { name: 'Worst severity', value: title(worst), inline: true },\n    { name: 'New findings', value: String(fs.length), inline: true },\n    { name: 'What matched', value: cut(lines, 1024) }\n  ];\n  if (notes) fields.push({ name: 'Triage (local LLM, advisory)', value: cut(notes, 1024) });\n  fields.push({ name: 'Evidence', value: cut([...new Set(fs.map((f) => code(f.evidence_dir)))].join('\\n'), 1024) });\n  return { json: { host, embed: {\n    title: cut(`🎯 ${fs.length} new finding${fs.length === 1 ? '' : 's'} · ${host}`, 256),\n    color: COLOUR[worst] ?? COLOUR.unknown,\n    fields,\n    footer: { text: `ASM · ${f0.engagement} · ${f0.run_id}` },\n    timestamp: f0.seen_at\n  } } };\n});\n"
+      }
+    },
+    {
+      "id": "486bb857-a3f2-471d-b810-faaa14e9d4d3",
+      "name": "Send Finding Alert",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        220
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "authentication": "botToken",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "sendTo": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "webhookId": "980fa28b-c0b4-49a4-b8ed-cd7d19c3f446"
+    },
+    {
+      "id": "26eaca4a-0255-4493-a192-01532cdac52a",
+      "name": "Return Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        560
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const RANK = { critical: 4, high: 3, medium: 2, low: 1, info: 0, unknown: -1 };\nconst ctx = $('When Called').first().json;\nconst nf = $('New Findings').first().json;\nconst alertable = nf.findings.filter((f) => (RANK[String(f.severity).toLowerCase()] ?? -1) >= RANK.medium || f.source === 'takeover').length;\nconst bySev = {};\nfor (const f of nf.findings) {\n  const s = String(f.severity || 'unknown').toLowerCase();\n  bySev[s] = (bySev[s] ?? 0) + 1;\n}\nconst stages = { ...(ctx.stages ?? {}), findings: { total: nf.total, new: nf.findings.length, alertable, by_severity: bySev } };\nreturn [{ json: { ...ctx, stages } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Read Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Findings": {
+      "main": [
+        [
+          {
+            "node": "Load Known Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Known Findings": {
+      "main": [
+        [
+          {
+            "node": "New Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New Findings": {
+      "main": [
+        [
+          {
+            "node": "Any New Findings?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Return Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any New Findings?": {
+      "main": [
+        [
+          {
+            "node": "Triage Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triage Findings": {
+      "main": [
+        [
+          {
+            "node": "Finding Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finding Rows": {
+      "main": [
+        [
+          {
+            "node": "Record Finding",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Alert Embeds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert Embeds": {
+      "main": [
+        [
+          {
+            "node": "Send Finding Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [
+    {
+      "id": "90b81d25-d87f-434a-b303-e15b7189f82c",
+      "name": "Triage, record and alert new findings",
+      "nodeIds": [
+        "3ddb5d0f-d971-43bf-9bad-6936c7372bc6",
+        "8d5e77eb-520a-4278-b777-d871b0871fb0",
+        "288369df-46bb-4dea-adcb-a5a77c3af4cd",
+        "6bfcea25-1551-4ac0-b4e1-6655bf504bdc",
+        "20e6be06-8c76-43ad-8529-d53e657b625f",
+        "486bb857-a3f2-471d-b810-faaa14e9d4d3"
+      ],
+      "description": "Only findings not already in asm_findings. Ollama notes are advisory. Alerts: medium+ or any takeover, one embed per host, max 20."
+    }
+  ],
+  "sourceWorkflowId": null,
+  "tags": []
+}

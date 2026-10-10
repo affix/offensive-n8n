@@ -1,0 +1,286 @@
+{
+  "id": "CrDggyf9Arylpvlq",
+  "name": "ASM · Scope Expiry Watch",
+  "description": "Daily: disables asm_scope engagements past scope_end, warns 3 days before, lists undated engagements on Mondays.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "3f7c4ed8-42f8-48fc-aaf2-f44548369f02",
+      "name": "Daily 07:52",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 7,
+              "triggerAtMinute": 52
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "3319d658-4baa-4128-9e6a-1482b401d5ae",
+      "name": "Get Scope",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_scope",
+          "cachedResultName": "asm_scope"
+        },
+        "returnAll": true
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "5554f816-ba52-462c-a128-d7a6456cecf7",
+      "name": "Check Now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "a0bb089b-85b8-4084-9236-b5211a72613d",
+      "name": "Evaluate Expiry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const WARN_DAYS = 3;\nconst day = (v) => { const d = v ? new Date(v) : null; return d && !Number.isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : null; };\nconst today = new Date().toISOString().slice(0, 10);\nconst daysUntil = (d) => Math.round((Date.parse(d) - Date.parse(today)) / 864e5);\n\nconst groups = new Map();\nfor (const { json: r } of $input.all()) {\n  if (!r.engagement || r.enabled !== true) continue;\n  const eng = String(r.engagement).trim().toLowerCase();\n  if (!groups.has(eng)) groups.set(eng, []);\n  groups.get(eng).push(r);\n}\n\nconst expired = [], expiring = [], undated = [];\nfor (const [eng, rs] of groups) {\n  const end = rs.map((r) => day(r.scope_end)).filter(Boolean).sort()[0] ?? null;\n  if (!end) { undated.push(eng); continue; }\n  const left = daysUntil(end);\n  if (left < 0) expired.push({ engagement: eng, scope_end: end, rows: rs.length });\n  else if (left <= WARN_DAYS) expiring.push({ engagement: eng, scope_end: end, days_left: left });\n}\nreturn [{ json: { today, expired, expiring, undated, monday: new Date().getUTCDay() === 1 } }];\n"
+      }
+    },
+    {
+      "id": "9d3ea9bc-77bf-4a8c-a694-91f4dc514dd1",
+      "name": "Expired Engagements",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        680,
+        160
+      ],
+      "parameters": {
+        "fieldToSplitOut": "expired",
+        "include": "noOtherFields"
+      }
+    },
+    {
+      "id": "9409a201-e26b-41c3-9e65-6102b579e09d",
+      "name": "Disable Scope Rows",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        160
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_scope",
+          "cachedResultName": "asm_scope"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "engagement",
+              "condition": "eq",
+              "keyValue": "={{ $json.engagement }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "enabled": false
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "enabled",
+              "displayName": "enabled",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "ab1bc992-21b8-460b-9643-4e13ceea8d6e",
+      "name": "Expiry Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        440
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const r = $('Evaluate Expiry').first().json;\nif (!r.expired.length && !r.expiring.length && !(r.monday && r.undated.length)) return [];\nconst code = (s) => '`' + s + '`';\nconst fields = [];\nif (r.expired.length) fields.push({ name: 'Expired and disabled', value: r.expired.map((e) => `${code(e.engagement)} ended ${e.scope_end} (${e.rows} rows disabled)`).join('\\n').slice(0, 1024) });\nif (r.expiring.length) fields.push({ name: 'Expiring soon', value: r.expiring.map((e) => `${code(e.engagement)} ends ${e.scope_end} (${e.days_left === 0 ? 'today' : `${e.days_left}d`})`).join('\\n').slice(0, 1024) });\nif (r.monday && r.undated.length) fields.push({ name: 'Enabled with no scope_end', value: r.undated.map(code).join(', ').slice(0, 1024) });\nreturn [{ json: { embed: {\n  title: r.expired.length ? '⛔ ASM scope expired' : '⏳ ASM scope ending soon',\n  color: r.expired.length ? 0x9B111E : 0xF39C12,\n  fields,\n  footer: { text: 'ASM · Scope Expiry Watch' },\n  timestamp: new Date().toISOString()\n} } }];\n"
+      }
+    },
+    {
+      "id": "7858f3cd-f4a8-4dc2-ab67-3950c63c6870",
+      "name": "Post Expiry Alert",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        900,
+        440
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "authentication": "botToken",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "sendTo": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "webhookId": "89ce966e-613e-4bec-8086-94c2dd528eb5"
+    }
+  ],
+  "connections": {
+    "Daily 07:52": {
+      "main": [
+        [
+          {
+            "node": "Get Scope",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Scope": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Expiry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Now": {
+      "main": [
+        [
+          {
+            "node": "Get Scope",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Expiry": {
+      "main": [
+        [
+          {
+            "node": "Expired Engagements",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expiry Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expired Engagements": {
+      "main": [
+        [
+          {
+            "node": "Disable Scope Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expiry Report": {
+      "main": [
+        [
+          {
+            "node": "Post Expiry Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "errorWorkflow": "oTbFYlbhb8Dlg0CM"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

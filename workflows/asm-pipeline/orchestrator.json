@@ -1,0 +1,1090 @@
+{
+  "id": "AIFqeCMPpOGdwGlq",
+  "name": "ASM · Orchestrator",
+  "description": "External attack surface pipeline. Every 6h / manual / form: scope gate from asm_scope, per-engagement lock, then Discovery, Takeover, Ports, Web, Diff, Vuln, Findings sub-workflows. Tracks runs in asm_runs.",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6,
+              "triggerAtMinute": 41
+            }
+          ]
+        }
+      },
+      "id": "3aac9939-e57d-46e2-ad6e-3a44d2a029d9",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        304
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.first().json;\nconst raw = String(j.engagement ?? '').trim().toLowerCase();\nlet trigger = 'manual';\nif (raw) trigger = 'form';\nelse if (j.timestamp || j['Readable date']) trigger = 'schedule';\nif (raw && !/^[a-z0-9][a-z0-9_-]{0,39}$/.test(raw)) throw new Error(`Invalid engagement name: ${raw}`);\nreturn [{ json: { trigger, engagement: raw || null, requested_at: new Date().toISOString() } }];\n"
+      },
+      "id": "d661f65e-edd8-4d42-a3a7-52a8b808f5dc",
+      "name": "Start Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        288,
+        688
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "984bfd8e-7343-4cef-8ab6-f58da877190e",
+      "name": "Run All Now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "n8nUserAuth",
+        "formTitle": "ASM: run one engagement",
+        "formDescription": "Runs the full pipeline for one engagement already defined (and enabled) in asm_scope. Ad-hoc targets are not accepted here.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Engagement",
+              "fieldName": "engagement",
+              "placeholder": "acme",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "appendAttribution": false,
+          "path": "asm-run",
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Run started. Progress lands in #n8n-alerts and the asm_runs table."
+            }
+          }
+        }
+      },
+      "id": "f3905717-2f07-42ad-b711-9bfa6ac7487d",
+      "name": "Run Engagement",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        688
+      ],
+      "webhookId": "c097a504-3fe3-4c93-8872-f79221fa1e59"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_scope",
+          "cachedResultName": "asm_scope"
+        },
+        "returnAll": true
+      },
+      "id": "40e5ced2-7cc6-4038-8abb-e63bbee05874",
+      "name": "Get Scope",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        512,
+        688
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const SCOPE_PY = \"import ipaddress\\nimport json\\nimport re\\nimport sys\\nfrom pathlib import Path\\n\\nHOST_RE = re.compile(r\\\"^(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\\\\.)+[a-z]{2,63}$\\\")\\nSC = Path(__file__).resolve().parent\\n\\n\\ndef lines(name: str) -> list[str]:\\n    p = SC / name\\n    if not p.exists():\\n        return []\\n    return [l.strip().lower() for l in p.read_text().splitlines() if l.strip()]\\n\\n\\nROOTS = lines(\\\"domains.txt\\\")\\nHOSTS = set(lines(\\\"hosts.txt\\\"))\\nEXC_NAMES: list[str] = []\\nEXC_NETS: list[ipaddress.IPv4Network] = []\\nfor e in lines(\\\"exclude.txt\\\"):\\n    try:\\n        EXC_NETS.append(ipaddress.ip_network(e, strict=False))\\n    except ValueError:\\n        EXC_NAMES.append(e[2:] if e.startswith(\\\"*.\\\") else e)\\nNETS = [ipaddress.ip_network(c, strict=False) for c in lines(\\\"cidrs.txt\\\") + lines(\\\"ips.txt\\\")]\\n\\n\\ndef name_ok(n: str) -> str | None:\\n    n = n.strip().lower().rstrip(\\\".\\\")\\n    if n.startswith(\\\"*.\\\"):\\n        n = n[2:]\\n    if not HOST_RE.match(n):\\n        return None\\n    if any(n == x or n.endswith(\\\".\\\" + x) for x in EXC_NAMES):\\n        return None\\n    if n in HOSTS or any(n == r or n.endswith(\\\".\\\" + r) for r in ROOTS):\\n        return n\\n    return None\\n\\n\\ndef ip_ok(s: str) -> str | None:\\n    try:\\n        ip = ipaddress.ip_address(s.strip())\\n    except ValueError:\\n        return None\\n    if ip.version != 4:\\n        return None\\n    if any(ip in n for n in EXC_NETS):\\n        return None\\n    if any(ip in n for n in NETS):\\n        return str(ip)\\n    if not ip.is_global:\\n        return None\\n    return str(ip)\\n\\n\\ndef cmd_names() -> None:\\n    seen: set[str] = set()\\n    for line in sys.stdin:\\n        n = name_ok(line)\\n        if n and n not in seen:\\n            seen.add(n)\\n            print(n)\\n\\n\\ndef load_nets(path: str | None) -> list[ipaddress.IPv4Network]:\\n    if not path or not Path(path).exists():\\n        return []\\n    out = []\\n    for line in Path(path).read_text().splitlines():\\n        try:\\n            out.append(ipaddress.ip_network(line.strip(), strict=False))\\n        except ValueError:\\n            continue\\n    return out\\n\\n\\ndef load_tagged(path: str | None) -> dict[str, str]:\\n    if not path or not Path(path).exists():\\n        return {}\\n    out = {}\\n    for line in Path(path).read_text().splitlines():\\n        parts = line.strip().split()\\n        if len(parts) >= 2:\\n            out[parts[0]] = parts[1]\\n    return out\\n\\n\\ndef explicit(ip: str) -> bool:\\n    a = ipaddress.ip_address(ip)\\n    return any(a in n for n in NETS)\\n\\n\\ndef cmd_resolve(dnsx_path: str, extra_ips_path: str, out: str, service_nets_path: str | None = None, edge_ips_path: str | None = None) -> None:\\n    \\\"\\\"\\\"Split resolved in-scope names into dedicated IPs (safe to port-scan) and shared third-party infrastructure.\\n\\n    service: CNAME leaves scope, or IP is in a shared AWS service range (S3, API Gateway). No IP scans, no vuln checks.\\n    edge:    IP is a CDN/WAF edge (Cloudflare, CloudFront...). No IP scans; hostname still gets web checks.\\n    Explicitly scoped IPs/CIDRs are never dropped.\\n    \\\"\\\"\\\"\\n    o = Path(out)\\n    service_nets = load_nets(service_nets_path)\\n    edge_ips = load_tagged(edge_ips_path)\\n    host_ip: dict[str, list[str]] = {}\\n    hosts: set[str] = set()\\n    shared: dict[str, str] = {}\\n    cname_hosts: set[str] = set()\\n    ips: set[str] = set()\\n    skipped_ips: set[str] = set()\\n    p = Path(dnsx_path)\\n    if p.exists():\\n        for line in p.read_text().splitlines():\\n            try:\\n                r = json.loads(line)\\n            except ValueError:\\n                continue\\n            h = name_ok(r.get(\\\"host\\\", \\\"\\\"))\\n            if not h:\\n                continue\\n            chain = [c.lower().rstrip(\\\".\\\") for c in (r.get(\\\"cname\\\") or [])]\\n            if chain:\\n                cname_hosts.add(h)\\n            resolved = sorted({i for i in (ip_ok(a) for a in r.get(\\\"a\\\") or []) if i})\\n            if not resolved:\\n                continue\\n            hosts.add(h)\\n            ext = next((c for c in chain if not name_ok(c)), None)\\n            dedicated = []\\n            for i in resolved:\\n                if explicit(i):\\n                    dedicated.append(i)\\n                    continue\\n                a = ipaddress.ip_address(i)\\n                if ext:\\n                    shared[h] = f\\\"service cname:{ext}\\\"\\n                elif any(a in n for n in service_nets):\\n                    shared[h] = \\\"service aws-shared-range\\\"\\n                elif i in edge_ips:\\n                    shared.setdefault(h, f\\\"edge {edge_ips[i]}\\\")\\n                else:\\n                    dedicated.append(i)\\n                    continue\\n                skipped_ips.add(i)\\n            if dedicated:\\n                host_ip[h] = dedicated\\n                ips.update(dedicated)\\n    for src in [extra_ips_path, str(SC / \\\"ips.txt\\\")]:\\n        sp = Path(src)\\n        if sp.exists():\\n            for line in sp.read_text().splitlines():\\n                i = ip_ok(line)\\n                if i:\\n                    ips.add(i)\\n    (o / \\\"hosts.txt\\\").write_text(\\\"\\\".join(f\\\"{h}\\\\n\\\" for h in sorted(hosts)))\\n    (o / \\\"cname_hosts.txt\\\").write_text(\\\"\\\".join(f\\\"{h}\\\\n\\\" for h in sorted(cname_hosts)))\\n    (o / \\\"ips.txt\\\").write_text(\\\"\\\".join(f\\\"{i}\\\\n\\\" for i in sorted(ips, key=ipaddress.ip_address)))\\n    (o / \\\"host_ip.json\\\").write_text(json.dumps(host_ip))\\n    (o / \\\"shared_hosts.txt\\\").write_text(\\\"\\\".join(f\\\"{h}\\\\t{why}\\\\n\\\" for h, why in sorted(shared.items())))\\n    print(json.dumps({\\\"hosts\\\": len(hosts), \\\"cname_hosts\\\": len(cname_hosts), \\\"ips\\\": len(ips),\\n                      \\\"shared_service\\\": sum(1 for v in shared.values() if v.startswith(\\\"service\\\")),\\n                      \\\"shared_edge\\\": sum(1 for v in shared.values() if v.startswith(\\\"edge\\\")),\\n                      \\\"shared_ips_skipped\\\": len(skipped_ips - ips)}))\\n\\n\\ndef cmd_ipfilter() -> None:\\n    for line in sys.stdin:\\n        i = ip_ok(line)\\n        if i:\\n            print(i)\\n\\n\\nif __name__ == \\\"__main__\\\":\\n    mode = sys.argv[1]\\n    if mode == \\\"names\\\":\\n        cmd_names()\\n    elif mode == \\\"resolve\\\":\\n        cmd_resolve(*sys.argv[2:7])\\n    elif mode == \\\"ips\\\":\\n        cmd_ipfilter()\\n    else:\\n        sys.exit(f\\\"unknown mode {mode}\\\")\\n\";\nconst req = $('Start Request').first().json;\nconst rows = $input.all().map((i) => i.json).filter((r) => r && r.engagement);\n\nconst ENG_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;\nconst HOST_RE = /^(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/;\nconst IP_RE = /^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}$/;\nconst TIME_RE = /^([01]\\d|2[0-3]):([0-5]\\d)$/;\nconst cut = (s, n = 60) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };\nconst clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);\n\nconst infer = (a) => {\n  if (/^https?:\\/\\//.test(a)) return 'url';\n  if (a.includes('/')) return 'cidr';\n  if (IP_RE.test(a)) return 'ip';\n  if (a.startsWith('*.')) return 'wildcard';\n  return 'domain';\n};\n\nconst inWindow = (s, e) => {\n  const ms = TIME_RE.exec(s ?? ''), me = TIME_RE.exec(e ?? '');\n  if (!ms || !me) return true;\n  const now = new Date();\n  const m = now.getUTCHours() * 60 + now.getUTCMinutes();\n  const a = +ms[1] * 60 + +ms[2], b = +me[1] * 60 + +me[2];\n  return a <= b ? m >= a && m < b : m >= a || m < b;\n};\n\nconst warnings = [];\nconst groups = new Map();\nfor (const r of rows) {\n  if (r.enabled !== true) continue;\n  const eng = String(r.engagement).trim().toLowerCase();\n  if (!ENG_RE.test(eng)) { warnings.push(`invalid engagement name '${cut(eng)}'`); continue; }\n  if (req.engagement && eng !== req.engagement) continue;\n  if (!groups.has(eng)) groups.set(eng, []);\n  groups.get(eng).push(r);\n}\n\nconst stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\\.\\d+Z$/, 'Z');\nconst out = [];\nconst skipped = [];\n\nfor (const [eng, rs] of groups) {\n  const t = { domains: new Set(), hosts: new Set(), ips: new Set(), cidrs: new Set(), urls: new Set(), exclude: new Set() };\n  const w = [];\n  for (const r of rs) {\n    const raw = String(r.asset ?? '').trim();\n    const a = raw.toLowerCase();\n    const type = String(r.asset_type ?? '').trim().toLowerCase() || infer(a);\n    const ex = r.exclude === true;\n    let ok = false;\n    if (type === 'domain' || type === 'wildcard') {\n      const d = a.replace(/^\\*\\./, '');\n      if (HOST_RE.test(d)) { (ex ? t.exclude : t.domains).add(d); ok = true; }\n    } else if (type === 'host') {\n      if (HOST_RE.test(a)) { (ex ? t.exclude : t.hosts).add(a); ok = true; }\n    } else if (type === 'ip') {\n      if (IP_RE.test(a)) { (ex ? t.exclude : t.ips).add(a); ok = true; }\n    } else if (type === 'cidr') {\n      const m = /^(.+)\\/(\\d{1,2})$/.exec(a);\n      if (m && IP_RE.test(m[1]) && +m[2] <= 32) {\n        if (ex || +m[2] >= 16) { (ex ? t.exclude : t.cidrs).add(a); ok = true; }\n        else { w.push(`${a} is wider than /16, refused`); ok = true; }\n      }\n    } else if (type === 'url') {\n      try {\n        const u = new URL(raw);\n        const h = u.hostname.toLowerCase();\n        if (['http:', 'https:'].includes(u.protocol) && (HOST_RE.test(h) || IP_RE.test(h))) {\n          if (ex) t.exclude.add(h);\n          else {\n            t.urls.add(u.origin + (u.pathname === '/' ? '' : u.pathname));\n            (IP_RE.test(h) ? t.ips : t.hosts).add(h);\n          }\n          ok = true;\n        }\n      } catch (e) { ok = false; }\n    }\n    if (!ok) w.push(`ignored ${type || '?'} '${cut(raw)}'`);\n  }\n\n  const assetRows = rs.filter((r) => r.exclude !== true);\n  const rates = assetRows.map((r) => parseInt(r.rate_limit, 10)).filter((n) => n > 0);\n  const rate = clamp(rates.length ? Math.min(...rates) : 50, 1, 500);\n  const intrusive = assetRows.length > 0 && assetRows.every((r) => r.allow_intrusive === true);\n  const permute = assetRows.some((r) => r.permutations === true);\n  const win = rs.find((r) => r.window_start_utc && r.window_end_utc);\n  const counts = { domains: t.domains.size, hosts: t.hosts.size, ips: t.ips.size, cidrs: t.cidrs.size, urls: t.urls.size, exclude: t.exclude.size };\n\n  if (counts.domains + counts.hosts + counts.ips + counts.cidrs === 0) { skipped.push(`${eng}: no valid targets`); continue; }\n  if (win && !inWindow(win.window_start_utc, win.window_end_utc)) { skipped.push(`${eng}: outside testing window ${win.window_start_utc}-${win.window_end_utc} UTC`); continue; }\n\n  const rand = Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0');\n  const run_id = `${stamp}-${rand}`;\n  const base = `/opt/loot/asm/${eng}`;\n  const run_dir = `${base}/${run_id}`;\n  const state_dir = `${base}/state`;\n  const settings = { engagement: eng, run_id, rate, intrusive, permute, window: win ? `${win.window_start_utc}-${win.window_end_utc}` : null, counts };\n  const file = (name, set) => `cat > \"$R/scope/${name}\" <<'ASM_EOF'\\n${[...set].sort().join('\\n')}${set.size ? '\\n' : ''}ASM_EOF`;\n  const bundle = [\n    'set -euo pipefail',\n    'umask 027',\n    `B='${base}'; R='${run_dir}'`,\n    'mkdir -p \"$B\"',\n    'if ! mkdir \"$B/.lock\" 2>/dev/null; then',\n    '  if [ -n \"$(find \"$B/.lock\" -maxdepth 0 -mmin +960 2>/dev/null)\" ]; then rmdir \"$B/.lock\"; mkdir \"$B/.lock\"; else echo \\'{\"locked\":true}\\'; exit 0; fi',\n    'fi',\n    `mkdir -p \"$R/scope\" '${state_dir}'`,\n    file('domains.txt', t.domains),\n    file('hosts.txt', t.hosts),\n    file('ips.txt', t.ips),\n    file('cidrs.txt', t.cidrs),\n    file('urls.txt', t.urls),\n    file('exclude.txt', t.exclude),\n    `cat > \"$R/scope/scope.py\" <<'ASM_PY'\\n${SCOPE_PY}ASM_PY`,\n    `cat > \"$R/scope/meta.json\" <<'ASM_EOF'\\n${JSON.stringify(settings)}\\nASM_EOF`,\n    'echo \\'{\"locked\":false}\\''\n  ].join('\\n') + '\\n';\n  const bundle_b64 = Buffer.from(bundle, 'utf8').toString('base64');\n  if (bundle_b64.length > 120000) { skipped.push(`${eng}: scope too large for one command (${bundle_b64.length} bytes)`); continue; }\n\n  out.push({ json: {\n    engagement: eng, run_id, run_dir, state_dir, rate,\n    port_rate: clamp(rate * 10, 100, 1000), intrusive, permute,\n    trigger: req.trigger, started_at: new Date().toISOString(),\n    scope_counts: counts, warnings: [...warnings, ...w], bundle_b64\n  } });\n}\n\nif (!out.length) {\n  const why = [...skipped, ...warnings].join('; ') || (req.engagement ? `no enabled scope rows for '${req.engagement}'` : 'no enabled scope rows');\n  if (req.trigger !== 'schedule') throw new Error(`Nothing to run: ${why}`);\n  return [];\n}\nreturn out;\n"
+      },
+      "id": "fbdfc24b-3ea1-4db6-bb85-c566b5e8ab4a",
+      "name": "Scope Gate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        736,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=printf '%s' '{{ $json.bundle_b64 }}' | base64 -d | bash"
+      },
+      "id": "c419988d-dfe2-443d-9f45-4e9e00aef943",
+      "name": "Prepare Run Dir",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1056,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ JSON.parse($json.stdout).locked }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "66b20598-a8b6-481f-b63d-31f54ea2eed9",
+      "name": "Engagement Locked?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1280,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "9d7ad558-68a0-43b6-b731-5f528715fc87",
+      "name": "Each Engagement",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        752,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('Each Engagement').first().json;\nconst { bundle_b64, ...ctx } = c;\nreturn [{ json: { ...ctx, stages: {} } }];\n"
+      },
+      "id": "b6fdb73b-7af3-4138-9c76-1b165d5731a3",
+      "name": "Run Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1536,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_runs",
+          "cachedResultName": "asm_runs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_id": "={{ $json.run_id }}",
+            "engagement": "={{ $json.engagement }}",
+            "trigger": "={{ $json.trigger }}",
+            "stage": "discovery",
+            "status": "running",
+            "started": "={{ $json.started_at }}",
+            "out_dir": "={{ $json.run_dir }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "run_id",
+              "displayName": "run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "engagement",
+              "displayName": "engagement",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "trigger",
+              "displayName": "trigger",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "stage",
+              "displayName": "stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "started",
+              "displayName": "started",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "out_dir",
+              "displayName": "out_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "b27c1b08-5941-456a-9994-3f64f28d3001",
+      "name": "Record Run Start",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1760,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "ApUnINf2NJHTPyye",
+          "cachedResultName": "ASM · 01 Discovery"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "9ee66074-03e2-4bbf-a9a4-a6368201a51e",
+      "name": "Discovery",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1760,
+        544
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "Bspp8isopjpCK6iC",
+          "cachedResultName": "ASM · 02 Takeover Check"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "8be185d9-a802-43e1-9015-9de1af01decb",
+      "name": "Takeover Check",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1984,
+        480
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "hdrbg87GU7HdPoj2",
+          "cachedResultName": "ASM · 03 Port Scan"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "75c17019-0966-403b-8119-3b6744dd15e8",
+      "name": "Port Scan",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        2208,
+        400
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "Fi24CkQg4NDtljrM",
+          "cachedResultName": "ASM · 04 Web Fingerprint"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "0238c0f8-bf57-480d-a4a5-602da5f9dc38",
+      "name": "Web Fingerprint",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        2432,
+        336
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "uGoTm9hPm0iJzU2G",
+          "cachedResultName": "ASM · 05 Diff"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "6607906b-d6c4-4cbe-bc78-79e0a96fcb0d",
+      "name": "Diff",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        2656,
+        256
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "cQKlLmHvZKJn3qH6",
+          "cachedResultName": "ASM · 06 Vuln Checks"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "80d724cc-8d09-405f-866b-0ea7f3fc8903",
+      "name": "Vuln Checks",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        2880,
+        192
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "EkqKNwqoMzw0Cdby",
+          "cachedResultName": "ASM · 08 Findings & Alerts"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "cf907b67-39b4-4ee8-b0d1-4b061e00b302",
+      "name": "Findings & Alerts",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        3104,
+        112
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $('Run Context').first().json;\nconst j = $input.first().json;\nconst ORDER = [\n  ['Discovery', 'discovery'], ['Takeover Check', 'takeover'], ['Port Scan', 'ports'], ['Web Fingerprint', 'web'],\n  ['Diff', 'diff'], ['Vuln Checks', 'vuln'], ['Findings & Alerts', 'findings']\n];\n\nconst stages = j.stages ?? {};\nconst errRaw = j.error ?? null;\nconst failed = errRaw !== null && errRaw !== undefined;\nconst errMsg = failed ? String(errRaw.message ?? errRaw.description ?? errRaw).replace(/\\s*\\[line \\d+\\]$/, '').slice(0, 900) : '';\nconst failedStage = failed ? (ORDER.map(([, k]) => k).find((k) => !stages[k]) ?? 'unknown') : null;\n\nconst d = stages.discovery ?? {}, p = stages.ports ?? {}, w = stages.web ?? {}, df = stages.diff ?? {}, f = stages.findings ?? {}, tk = stages.takeover ?? {}, v = stages.vuln ?? {};\nconst started = new Date(ctx.started_at);\nconst finished = new Date();\nconst mins = Math.round((finished - started) / 60000);\nconst timedOut = Object.entries(stages).filter(([, s]) => s && s.timed_out).map(([k]) => k);\n\nconst notify = failed || ctx.trigger !== 'schedule' || df.baseline === true ||\n  (df.assets_new ?? 0) + (df.assets_changed ?? 0) > 0 || (f.alertable ?? 0) > 0 || timedOut.length > 0;\n\nconst n = (x) => (x === undefined || x === null ? '–' : String(x));\nconst code = (s) => '`' + String(s).replace(/`/g, \"'\") + '`';\nconst fields = [\n  { name: 'Trigger', value: ctx.trigger, inline: true },\n  { name: 'Duration', value: `${mins} min`, inline: true },\n  { name: 'Intrusive checks', value: ctx.intrusive ? 'on' : 'off', inline: true },\n  { name: 'Names / hosts / IPs', value: `${n(d.names)} / ${n(d.hosts)} / ${n(d.ips)}`, inline: true },\n  { name: 'Shared infra (no IP scans)', value: `${n(d.shared_service)} service / ${n(d.shared_edge)} edge`, inline: true },\n  { name: 'Ports open (new)', value: `${n(p.ports_open)} (${n(p.ports_new)})`, inline: true },\n  { name: 'Web live', value: n(w.web_live), inline: true },\n  { name: 'Assets new / changed', value: `${n(df.assets_new)} / ${n(df.assets_changed)}${df.baseline ? ' · baseline' : ''}`, inline: true },\n  { name: 'Takeover / vuln hits', value: `${n(tk.takeover_findings)} / ${n(v.vuln_findings)}`, inline: true },\n  { name: 'New findings (alerted)', value: `${n(f.new)} (${n(f.alertable)})`, inline: true }\n];\nif (timedOut.length) fields.push({ name: 'Timed out (partial results)', value: timedOut.join(', ') });\nif (ctx.warnings?.length) fields.push({ name: 'Scope warnings', value: ctx.warnings.slice(0, 8).join('\\n').slice(0, 1024) });\nif (failed) fields.push({ name: `Failed at ${failedStage}`, value: ('```\\n' + errMsg + '\\n```').slice(0, 1024) });\nfields.push({ name: 'Evidence', value: code(ctx.run_dir) });\n\nreturn [{ json: {\n  run_id: ctx.run_id,\n  engagement: ctx.engagement,\n  status: failed ? 'failed' : 'ok',\n  stage: failed ? failedStage : 'done',\n  finished: finished.toISOString(),\n  hosts: d.hosts ?? 0,\n  assets_new: df.assets_new ?? 0,\n  assets_changed: df.assets_changed ?? 0,\n  findings_new: f.new ?? 0,\n  error: errMsg,\n  notify,\n  embed: {\n    title: `${failed ? '❌' : '✅'} ASM run · ${ctx.engagement}`,\n    color: failed ? 0x9B111E : (f.alertable ?? 0) > 0 ? 0xE67E22 : 0x2ECC71,\n    fields,\n    footer: { text: `ASM · ${ctx.run_id}` },\n    timestamp: finished.toISOString()\n  }\n} }];\n"
+      },
+      "id": "3821f49e-4b4e-48ff-9f37-3eeca62b06b7",
+      "name": "Finish Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3392,
+        912
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_runs",
+          "cachedResultName": "asm_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "run_id",
+              "keyValue": "={{ $json.run_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ $json.status }}",
+            "stage": "={{ $json.stage }}",
+            "finished": "={{ $json.finished }}",
+            "hosts": "={{ $json.hosts }}",
+            "assets_new": "={{ $json.assets_new }}",
+            "assets_changed": "={{ $json.assets_changed }}",
+            "findings_new": "={{ $json.findings_new }}",
+            "error": "={{ $json.error }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "stage",
+              "displayName": "stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "finished",
+              "displayName": "finished",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "hosts",
+              "displayName": "hosts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "assets_new",
+              "displayName": "assets_new",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "assets_changed",
+              "displayName": "assets_changed",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "findings_new",
+              "displayName": "findings_new",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "error",
+              "displayName": "error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "3328134c-a4bc-4b32-ac21-801e674f774d",
+      "name": "Update Run",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        3616,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.notify }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c207ce51-f111-4ecd-9674-2ebb46f46cd9",
+      "name": "Worth Posting?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3616,
+        912
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "id": "4dc6e9a6-91f8-4784-9667-890f2926a39b",
+      "name": "Post Run Summary",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        3840,
+        912
+      ],
+      "webhookId": "cf0ca6dd-8ff9-43e4-937f-115551dddbb1",
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "command": "=E='{{ $('Run Context').first().json.engagement }}'\ncase \"$E\" in ''|*[!a-z0-9_-]*) echo 'bad engagement' >&2; exit 1;; esac\nrmdir \"/opt/loot/asm/$E/.lock\" 2>/dev/null || true\necho '{\"released\":true}'"
+      },
+      "id": "9141eb75-86fe-44bc-8ce8-f49bb00db9ba",
+      "name": "Release Lock",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        3616,
+        1104
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## ASM pipeline\nScope lives in the **asm_scope** data table (only `enabled = true` rows run). Types: domain, wildcard, host, ip, cidr (/16 or narrower), url. `exclude = true` rows remove names, IPs or ranges. Intrusive checks (nuclei DAST, dalfox, intrusive templates) need `allow_intrusive = true` on every asset row of the engagement. Optional `window_start_utc` / `window_end_utc` (HH:MM). Evidence: /opt/loot/asm/<engagement>/<run_id>/. State for diffing: /opt/loot/asm/<engagement>/state/.",
+        "height": 220,
+        "width": 620,
+        "color": 4
+      },
+      "id": "3c1e3119-78e7-488c-add6-84cf060fdac6",
+      "name": "Sticky Note 296051e7",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        256,
+        240
+      ]
+    },
+    {
+      "id": "3bdcc8d7-8ade-4285-bf0a-8cb195e78865",
+      "name": "Scope Dates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        570,
+        140
+      ],
+      "parameters": {
+        "jsCode": "const req = $('Start Request').first().json;\nconst day = (v) => { const d = v ? new Date(v) : null; return d && !Number.isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : null; };\nconst key = (r) => String((r && r.engagement) || '').trim().toLowerCase();\nconst today = new Date().toISOString().slice(0, 10);\nconst by = {};\nfor (const i of $input.all()) {\n  const r = i.json;\n  if (!r || !r.engagement || r.enabled !== true) continue;\n  (by[key(r)] = by[key(r)] || []).push(r);\n}\nconst blocked = {};\nfor (const [e, rs] of Object.entries(by)) {\n  const s = rs.map((r) => day(r.scope_start)).filter(Boolean).sort().at(-1);\n  const en = rs.map((r) => day(r.scope_end)).filter(Boolean).sort()[0];\n  if (s && today < s) blocked[e] = `scope starts ${s}`;\n  else if (en && today > en) blocked[e] = `scope ended ${en}`;\n}\nconst keep = $input.all().filter((i) => !blocked[key(i.json)]);\nif (req.trigger !== 'schedule') {\n  const live = keep.some((i) => i.json.enabled === true && (!req.engagement || key(i.json) === req.engagement));\n  const hit = req.engagement ? (blocked[req.engagement] ? [req.engagement] : []) : (live ? [] : Object.keys(blocked));\n  if (hit.length) throw new Error(`Nothing to run: ${hit.map((e) => `${e}: ${blocked[e]}`).join('; ')}`);\n}\nreturn keep.length ? keep : [{ json: {} }];\n",
+        "mode": "runOnceForAllItems"
+      }
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": {
+      "main": [
+        [
+          {
+            "node": "Start Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Request": {
+      "main": [
+        [
+          {
+            "node": "Get Scope",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run All Now": {
+      "main": [
+        [
+          {
+            "node": "Start Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Engagement": {
+      "main": [
+        [
+          {
+            "node": "Start Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scope Gate": {
+      "main": [
+        [
+          {
+            "node": "Each Engagement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Run Dir": {
+      "main": [
+        [
+          {
+            "node": "Engagement Locked?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Engagement Locked?": {
+      "main": [
+        [
+          {
+            "node": "Each Engagement",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Each Engagement": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Prepare Run Dir",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Context": {
+      "main": [
+        [
+          {
+            "node": "Record Run Start",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Discovery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discovery": {
+      "main": [
+        [
+          {
+            "node": "Takeover Check",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Takeover Check": {
+      "main": [
+        [
+          {
+            "node": "Port Scan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Port Scan": {
+      "main": [
+        [
+          {
+            "node": "Web Fingerprint",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Web Fingerprint": {
+      "main": [
+        [
+          {
+            "node": "Diff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diff": {
+      "main": [
+        [
+          {
+            "node": "Vuln Checks",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vuln Checks": {
+      "main": [
+        [
+          {
+            "node": "Findings & Alerts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Findings & Alerts": {
+      "main": [
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finish Run": {
+      "main": [
+        [
+          {
+            "node": "Update Run",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Worth Posting?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Release Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Worth Posting?": {
+      "main": [
+        [
+          {
+            "node": "Post Run Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Release Lock": {
+      "main": [
+        [
+          {
+            "node": "Each Engagement",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Scope": {
+      "main": [
+        [
+          {
+            "node": "Scope Dates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scope Dates": {
+      "main": [
+        [
+          {
+            "node": "Scope Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "errorWorkflow": "oTbFYlbhb8Dlg0CM",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [
+    {
+      "id": "2f479b92-5a37-4489-9c6d-1fba3610e022",
+      "name": "Close out run",
+      "nodeIds": [
+        "3821f49e-4b4e-48ff-9f37-3eeca62b06b7",
+        "3328134c-a4bc-4b32-ac21-801e674f774d",
+        "c207ce51-f111-4ecd-9674-2ebb46f46cd9",
+        "4dc6e9a6-91f8-4784-9667-890f2926a39b",
+        "9141eb75-86fe-44bc-8ce8-f49bb00db9ba"
+      ],
+      "description": "Writes asm_runs, posts a summary when something changed (or the run failed / was manual), releases the engagement lock."
+    },
+    {
+      "id": "109ca92a-2818-4624-a033-a0cdfe28773d",
+      "name": "Per-engagement lock",
+      "nodeIds": [
+        "c419988d-dfe2-443d-9f45-4e9e00aef943",
+        "66b20598-a8b6-481f-b63d-31f54ea2eed9"
+      ],
+      "description": "Writes scope files and takes /opt/loot/asm/<eng>/.lock; a run already in progress skips this engagement (stale after 16h)."
+    },
+    {
+      "id": "8352e582-a70d-4c68-b8a2-fd5c98d23e04",
+      "name": "Intake and scope gate",
+      "nodeIds": [
+        "d661f65e-edd8-4d42-a3a7-52a8b808f5dc",
+        "40e5ced2-7cc6-4038-8abb-e63bbee05874",
+        "3bdcc8d7-8ade-4285-bf0a-8cb195e78865",
+        "fbdfc24b-3ea1-4db6-bb85-c566b5e8ab4a"
+      ],
+      "description": "Load asm_scope, drop engagements outside scope_start/scope_end, validate targets, build scope bundle."
+    }
+  ],
+  "sourceWorkflowId": null,
+  "tags": []
+}

@@ -1,0 +1,158 @@
+{
+  "id": "ApUnINf2NJHTPyye",
+  "name": "ASM · 01 Discovery",
+  "description": "Stage 1: subfinder (+ optional alterx) for roots, dnsx resolution, mapcidr expansion, scope filter. Writes hosts/ips/cname lists.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "93ad9c89-a3eb-49a0-9dde-9307b4a66797",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "46293293-6871-4808-a6a2-eba6cb15d4fd",
+      "name": "Build Discovery Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STAGE = 'discovery';\nconst MAX_MINUTES = 120;\nconst BODY = \"SC=\\\"$R/scope\\\"\\ndrun() { docker run --rm -i --user \\\"$(id -u):$(id -g)\\\" -e HOME=/tmp -v \\\"$S:/w\\\" -w /w \\\"$@\\\"; }\\n\\n: > names.raw.txt\\nif [ -s \\\"$SC/domains.txt\\\" ]; then\\n  timeout 45m subfinder -dL \\\"$SC/domains.txt\\\" -silent -o subfinder.txt >/dev/null 2>subfinder.log || true\\n  cat \\\"$SC/domains.txt\\\" >> names.raw.txt\\n  [ -f subfinder.txt ] && cat subfinder.txt >> names.raw.txt\\nfi\\n[ -s \\\"$SC/hosts.txt\\\" ] && cat \\\"$SC/hosts.txt\\\" >> names.raw.txt\\npython3 \\\"$SC/scope.py\\\" names < names.raw.txt > names.txt\\n\\nif [ \\\"$PERMUTE\\\" = 1 ] && [ -s names.txt ]; then\\n  drun projectdiscovery/alterx:v0.0.6 -silent -limit 20000 < names.txt > alterx.txt 2>alterx.log || true\\n  cat names.txt alterx.txt | python3 \\\"$SC/scope.py\\\" names > names.perm.txt\\n  mv names.perm.txt names.txt\\nfi\\n\\n: > dnsx.jsonl\\nif [ -s names.txt ]; then\\n  timeout 30m dnsx -l names.txt -silent -a -cname -resp -json -retry 2 -o dnsx.jsonl >/dev/null 2>dnsx.log || true\\n  touch dnsx.jsonl\\nfi\\n\\n: > cidr_ips.txt\\nif [ -s \\\"$SC/cidrs.txt\\\" ]; then\\n  cp \\\"$SC/cidrs.txt\\\" cidrs.txt\\n  drun projectdiscovery/mapcidr:v1.1.16 -cl /w/cidrs.txt -silent > cidr_ips.raw.txt 2>mapcidr.log || true\\n  python3 \\\"$SC/scope.py\\\" ips < cidr_ips.raw.txt > cidr_ips.txt\\nfi\\n\\nCACHE=/opt/loot/asm/_cache\\nmkdir -p \\\"$CACHE\\\"\\nAWS=\\\"$CACHE/aws-ip-ranges.json\\\"\\nif [ -z \\\"$(find \\\"$AWS\\\" -mmin -1440 2>/dev/null)\\\" ]; then\\n  curl -s -m 30 -o \\\"$AWS.tmp\\\" https://ip-ranges.amazonaws.com/ip-ranges.json && jq -e '.prefixes' \\\"$AWS.tmp\\\" >/dev/null 2>&1 && mv \\\"$AWS.tmp\\\" \\\"$AWS\\\"\\n  rm -f \\\"$AWS.tmp\\\"\\nfi\\n: > service_nets.txt\\n[ -s \\\"$AWS\\\" ] && jq -r '.prefixes[] | select(.service == \\\"S3\\\" or .service == \\\"API_GATEWAY\\\") | .ip_prefix' \\\"$AWS\\\" | sort -u > service_nets.txt\\n\\njq -r '.a[]?' dnsx.jsonl 2>/dev/null | sort -u > resolved_ips.txt\\n: > edge_ips.txt\\nif [ -s resolved_ips.txt ]; then\\n  docker run --rm -i projectdiscovery/cdncheck:v1.1.36 -resp -jsonl -silent -duc < resolved_ips.txt 2>cdncheck.log \\\\\\n    | jq -r 'select(.cdn == true or .waf == true) | \\\"\\\\(.ip) \\\\(.cdn_name // .waf_name // \\\"edge\\\")\\\"' > edge_ips.txt || true\\nfi\\n\\ncounts=$(python3 \\\"$SC/scope.py\\\" resolve dnsx.jsonl cidr_ips.txt . service_nets.txt edge_ips.txt)\\njq -nc --argjson c \\\"$counts\\\" --argjson names \\\"$(wc -l < names.txt)\\\" '$c + {names: $names}' > result.json\\n\";\nconst c = $input.first().json;\nconst SAFE = /^[A-Za-z0-9_.\\/:-]+$/;\nconst q = (k) => {\n  const v = String(c[k] ?? '');\n  if (!SAFE.test(v)) throw new Error(`Unsafe or missing context value for ${k}: ${v}`);\n  return `'${v}'`;\n};\nconst int = (v, lo, hi, d) => Math.min(Math.max(parseInt(v ?? d, 10) || d, lo), hi);\nconst header = [\n  '#!/usr/bin/env bash',\n  'set -uo pipefail',\n  `R=${q('run_dir')}`,\n  `S=${q('run_dir').slice(0, -1)}/${STAGE}'`,\n  `ENG=${q('engagement')}`,\n  `RUN_ID=${q('run_id')}`,\n  `STATE=${q('state_dir')}`,\n  `RATE=${int(c.rate, 1, 500, 50)}`,\n  `PORT_RATE=${int(c.port_rate, 50, 2000, 500)}`,\n  `INTRUSIVE=${c.intrusive === true ? 1 : 0}`,\n  `PERMUTE=${c.permute === true ? 1 : 0}`,\n  'mkdir -p \"$S\" && cd \"$S\" || exit 1',\n  ''\n].join('\\n');\nreturn [{ json: { job_dir: `${c.run_dir}/${STAGE}`, script: header + BODY, max_minutes: MAX_MINUTES } }];\n"
+      }
+    },
+    {
+      "id": "37ee5eb4-a3ce-47e7-85c5-013db0baa2e5",
+      "name": "Run Discovery",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "QptyXc2oFNL8f8gX",
+          "cachedResultName": "ASM · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "608e7bc1-c746-4e89-8297-be0b9d6ba1fe",
+      "name": "Return Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst r = $input.first().json;\nconst stages = { ...(ctx.stages ?? {}), discovery: { ...(r.result ?? {}), rc: r.rc, timed_out: r.timed_out } };\nreturn [{ json: { ...ctx, stages } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Build Discovery Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Discovery Script": {
+      "main": [
+        [
+          {
+            "node": "Run Discovery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Discovery": {
+      "main": [
+        [
+          {
+            "node": "Return Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

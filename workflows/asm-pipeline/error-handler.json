@@ -1,0 +1,112 @@
+{
+  "id": "oTbFYlbhb8Dlg0CM",
+  "name": "ASM · Error Handler",
+  "description": "Error workflow for the ASM pipeline: posts failing workflow, node, execution link and message to Discord.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "38e736b0-1ba0-4914-bd0b-0c60ca815767",
+      "name": "On Workflow Error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "affe7f3c-932d-47a7-a839-382c709a1640",
+      "name": "Format Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const j = $input.first().json;\nconst cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };\nconst ex = j.execution ?? {};\nconst err = ex.error ?? {};\nconst wf = j.workflow ?? {};\nreturn [{ json: { embed: {\n  title: cut(`💥 ${wf.name ?? 'Workflow'} failed`, 256),\n  url: ex.url || undefined,\n  color: 0x9B111E,\n  description: cut('```\\n' + (err.message ?? 'no message') + '\\n```', 2000),\n  fields: [\n    { name: 'Failed node', value: cut(ex.lastNodeExecuted ?? 'unknown', 256), inline: true },\n    { name: 'Mode', value: cut(ex.mode ?? 'unknown', 64), inline: true },\n    { name: 'Execution', value: cut(String(ex.id ?? 'n/a'), 64), inline: true }\n  ],\n  footer: { text: 'ASM · Error Handler' },\n  timestamp: new Date().toISOString()\n} } }];\n"
+      }
+    },
+    {
+      "id": "94b71848-f1a7-442a-bc70-b834e98a466f",
+      "name": "Send Error Alert",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "authentication": "botToken",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "sendTo": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "webhookId": "2659dcb6-e878-4fb7-aaf8-93bae95cf215"
+    }
+  ],
+  "connections": {
+    "On Workflow Error": {
+      "main": [
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error": {
+      "main": [
+        [
+          {
+            "node": "Send Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}
