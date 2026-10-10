@@ -1,0 +1,43 @@
+---
+# PostgreSQL in Docker Compose, for workflow data n8n stores via the Postgres
+# node (not n8n's own state, which stays in sqlite). Published on loopback only,
+# so the host-native n8n reaches it and nothing else does. restart:
+# unless-stopped plus the enabled docker service brings it back after a reboot.
+
+- name: Create the postgres directory
+  ansible.builtin.file:
+    path: "{{ postgres_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+# Generated on the host on first run and never templated, so the password is
+# not in the repo or the Ansible output. Owned by the image's postgres uid so
+# the entrypoint can read it after dropping root.
+- name: Generate the postgres password
+  ansible.builtin.shell:
+    cmd: umask 077 && openssl rand -hex 32 > {{ postgres_dir }}/postgres_password
+    creates: "{{ postgres_dir }}/postgres_password"
+
+- name: Restrict the postgres password file
+  ansible.builtin.file:
+    path: "{{ postgres_dir }}/postgres_password"
+    owner: "{{ postgres_container_uid }}"
+    group: "{{ postgres_container_uid }}"
+    mode: "0400"
+
+- name: Template the compose file
+  ansible.builtin.template:
+    src: compose.yaml.j2
+    dest: "{{ postgres_dir }}/compose.yaml"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Start postgres
+  community.docker.docker_compose_v2:
+    project_src: "{{ postgres_dir }}"
+    state: present
+    wait: true
+    wait_timeout: 120

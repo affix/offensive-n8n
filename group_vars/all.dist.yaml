@@ -167,3 +167,34 @@ autossh_remote_port: 22
 # to reach the forward from the management LAN; 127.0.0.1 keeps it on-box.
 autossh_local_forwards:
   - "127.0.0.1:9200:127.0.0.1:9200"
+
+# --- PostgreSQL (workflow data store) ---------------------------------------
+
+# PostgreSQL in Docker Compose for data n8n workflows store via the Postgres
+# node. n8n's own state stays in sqlite. Off by default.
+postgres_enabled: false
+postgres_image: "postgres:18.4-trixie"
+
+# Compose file, data directory and the generated password file live here.
+# Read the password with: sudo cat {{ postgres_dir }}/postgres_password
+postgres_dir: "/opt/postgres"
+
+# Loopback only: the host-native n8n connects to 127.0.0.1. Docker-published
+# ports bypass the nftables input chain, so do not bind a LAN address here.
+postgres_bind_ip: "127.0.0.1"
+postgres_port: 5432
+
+postgres_db: "n8n_data"
+postgres_user: "n8n"
+
+# uid of the postgres user inside the official image.
+postgres_container_uid: 999
+
+# Server settings passed as -c flags. Sized for an 8GB host shared with n8n.
+postgres_shm_size: "256mb"
+postgres_settings:
+  shared_buffers: "1GB"
+  effective_cache_size: "3GB"
+  work_mem: "32MB"
+  maintenance_work_mem: "256MB"
+  max_connections: 50

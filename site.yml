@@ -23,5 +23,7 @@
     - docker
     - n8n
     - tooling
+    - role: postgres
+      when: postgres_enabled | default(false)
     - role: autossh
       when: autossh_enabled | default(false)
