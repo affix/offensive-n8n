@@ -8,7 +8,7 @@ Everything starts at the *Orchestrator*. It reads `asm_scope`, drops engagements
 
 Each engagement then goes through seven stage sub-workflows in order: Discovery, Takeover Check, Port Scan, Web Fingerprint, Diff, Vuln Checks and Findings & Alerts. The stages do not run tools directly from n8n. Each one builds a bash script and hands it to the *Job Runner*, which launches it detached on the host with `setsid` and `timeout`, polls for completion and returns the stage's `result.json`. This keeps long scans from tripping n8n's own execution timeouts and means a scan survives a slow poll. A stage that fails is routed down its error output to *Finish Run*, so the run is still closed out in `asm_runs`, the lock is released and the failure is posted.
 
-A few supporting workflows sit alongside the main run. *CVE Watch* matches new CVEs and the CISA KEV catalogue against what the pipeline has fingerprinted, *Housekeeping* keeps the evidence directory and tooling healthy, *Scope Expiry Watch* switches off engagements whose scope has ended, and the *Error Handler* posts any unhandled failure to Discord. The Orchestrator, CVE Watch, Housekeeping and Scope Expiry Watch all name the Error Handler as their `errorWorkflow`. The stage sub-workflows do not, because their errors are caught by the Orchestrator.
+A few supporting workflows sit alongside the main run. *CVE Watch* matches new CVEs and the CISA KEV catalogue against what the pipeline has fingerprinted, *Housekeeping* keeps the evidence directory and tooling healthy, *Scope Expiry Watch* switches off engagements whose scope has ended, *Client Report* turns an engagement's data into a report we can hand to the client, and the *Error Handler* posts any unhandled failure to Discord. The Orchestrator, CVE Watch, Housekeeping and Scope Expiry Watch all name the Error Handler as their `errorWorkflow`. The stage sub-workflows do not, because their errors are caught by the Orchestrator.
 
 ## What each workflow does
 
@@ -96,6 +96,18 @@ This runs daily at 07:52. It sets `enabled = false` on every `asm_scope` row of 
 
 Data tables: reads and updates `asm_scope`.
 
+### ASM · Client Report (`client-report.json`)
+
+This turns everything the pipeline knows about one engagement into a report we can send to the client. It is started from an n8n form at `/form/asm-report`, which needs an n8n login, and asks for the engagement, the client name to print on the report, the reporting period in days (`0` means all time), the minimum severity to include, whether to hide findings whose `status` marks them as a false positive or duplicate, and whether Ollama should draft the executive summary.
+
+*Report Params* validates the engagement name and creates `/opt/loot/asm/<engagement>/reports/<stamp>-<rand>/`. The workflow then reads the engagement's rows from `asm_scope`, `asm_runs`, `asm_assets` and `asm_findings`. An engagement that is not in `asm_scope` stops the run with an error, but a disabled or expired engagement can still be reported on. *Build Report Data* works out the overall rating from the worst open finding, leaving out findings that triage puts at 80% or more likely to be a false positive. It gives each finding a **confidence** (*Detected*, *Version match*, *Unconfirmed* for CVE Watch matches whose version could not be checked, or *Low*) and a generic recommendation based on its source and template. It also flags commonly attacked services such as RDP, SMB, databases, Redis and the Docker API that are reachable from the internet. Findings with a `status` of `fixed`, `resolved`, `closed`, `remediated` or `mitigated` move to a separate resolved list.
+
+If the summary is wanted, *Ask Ollama* sends only the headline numbers and the top 15 findings to the local model and asks for a short summary in British English and up to five priority actions. When Ollama is unreachable, or replies with something unparseable, *Render Report* writes a summary from the numbers instead. The report itself is a single self-contained HTML file with a cover page, executive summary, scope and methodology, findings overview and detail, attack surface inventory and run history. It is written alongside `findings.csv`, `assets.csv` and `report.json`, then printed to `report.pdf` by headless Chrome in a pinned container with no network access. If the PDF step fails, the HTML is used in its place.
+
+Each report is logged to `asm_reports` and posted to Discord with the PDF attached, so the full client report lands in the alerts channel. When the form was filled in from a browser, the PDF is also returned as a download. Runs started through the API or MCP skip that last step, because the *Form Ending* node would otherwise wait forever for a browser to collect the file.
+
+Data tables: reads `asm_scope`, `asm_runs`, `asm_assets` and `asm_findings`, writes `asm_reports`.
+
 ### ASM · Error Handler (`error-handler.json`)
 
 This is an error-trigger workflow. It posts the failing workflow, the node, the execution mode and ID, and the error message to Discord, with a link to the execution.
@@ -106,10 +118,10 @@ The stages run on the same host as n8n through the **Execute Command** node. n8n
 
 - `subfinder`, `dnsx`, `nuclei`, `katana` and `ffuf` on its `PATH`.
 - Passwordless sudo for exactly `/usr/bin/naabu` and `/usr/bin/nmap`, because SYN scans need raw sockets.
-- Access to Docker, plus the pinned images `projectdiscovery/httpx:v1.12.0`, `projectdiscovery/alterx:v0.0.6`, `projectdiscovery/mapcidr:v1.1.16`, `projectdiscovery/cdncheck:v1.1.36` and `hahwul/dalfox:v2.12.0`.
+- Access to Docker, plus the pinned images `projectdiscovery/httpx:v1.12.0`, `projectdiscovery/alterx:v0.0.6`, `projectdiscovery/mapcidr:v1.1.16`, `projectdiscovery/cdncheck:v1.1.36`, `hahwul/dalfox:v2.12.0` and, for Client Report, `zenika/alpine-chrome:124`. Client Report pulls the Chrome image itself on first use, which can take a few minutes.
 - `python3` 3.10 or newer (standard library only), `jq`, `curl`, `gzip`, `tar` and the coreutils `timeout` and `setsid`.
 - Write access to `/opt/loot/asm`.
-- An Ollama instance reachable from n8n for stage 07, with the model you set as `OLLAMA_MODEL` already pulled.
+- An Ollama instance reachable from n8n for stage 07 and Client Report, with the model you set as `OLLAMA_MODEL` already pulled.
 
 Evidence and state are laid out like this:
 
@@ -122,6 +134,7 @@ Evidence and state are laid out like this:
     state/                    ports.txt, web.json, services.json, web_latest.jsonl
     <stamp>-<rand>/           one directory per run
       scope/ discovery/ takeover/ ports/ web/ diff/ vuln/ findings/
+    reports/<stamp>-<rand>/   report.pdf, report.html, findings.csv, assets.csv, report.json
 ```
 
 ## Creating the data tables
@@ -224,18 +237,40 @@ This table holds every finding the pipeline has seen. Findings & Alerts and CVE 
 | `first_seen` | date |
 | `last_seen` | date |
 
+### asm_reports
+
+This table holds one row per client report. Client Report writes it, and nothing reads it back, so it is purely a record of what was sent and when.
+
+| Column | Type |
+|---|---|
+| `report_id` | string |
+| `engagement` | string |
+| `client_name` | string |
+| `requested_by` | string |
+| `period_days` | number |
+| `min_severity` | string |
+| `ai_summary` | boolean |
+| `out_dir` | string |
+| `findings` | number |
+| `critical` | number |
+| `high` | number |
+| `assets` | number |
+| `rating` | string |
+| `pdf` | boolean |
+| `generated` | date |
+
 ## Importing the workflows
 
-The exports keep their original workflow IDs, so the *Execute Workflow* references between them resolve as long as everything is imported into the same instance. That also means an import overwrites any existing workflow with the same ID. Import the sub-workflows first so the callers find them. A sensible order is the Job Runner, the Error Handler, 07 Triage, stages 01 to 06 and 08, and finally the Orchestrator, CVE Watch, Housekeeping and Scope Expiry Watch. The `errorWorkflow` setting on the scheduled workflows points at the Error Handler's ID (`oTbFYlbhb8Dlg0CM`). If you import the Error Handler under a different ID, re-select it in each workflow's settings.
+The exports keep their original workflow IDs, so the *Execute Workflow* references between them resolve as long as everything is imported into the same instance. That also means an import overwrites any existing workflow with the same ID. Import the sub-workflows first so the callers find them. A sensible order is the Job Runner, the Error Handler, 07 Triage, stages 01 to 06 and 08, and finally the Orchestrator, CVE Watch, Housekeeping, Scope Expiry Watch and Client Report. The `errorWorkflow` setting on these top-level workflows points at the Error Handler's ID (`oTbFYlbhb8Dlg0CM`). If you import the Error Handler under a different ID, re-select it in each workflow's settings.
 
 The exports have been scrubbed of anything specific to the original instance, so a few placeholders need filling in before the first run:
 
 | Placeholder | Where | What to do |
 |---|---|---|
-| `DATA_TABLE_<name>` | Every Data table node | Re-select the matching table (`asm_scope`, `asm_runs`, `asm_assets`, `asm_findings`) from the list. |
+| `DATA_TABLE_<name>` | Every Data table node | Re-select the matching table (`asm_scope`, `asm_runs`, `asm_assets`, `asm_findings`, `asm_reports`) from the list. |
 | `CREDENTIAL_ID` | Discord nodes | Create a **Discord Bot** credential (named *Discord Bot account* in the exports) and select it. No other credentials are used in this folder. |
-| `DISCORD_GUILD_ID`, `DISCORD_ALERTS_CHANNEL_ID` | Discord nodes in the Orchestrator, 08, CVE Watch, Housekeeping, Scope Expiry Watch and the Error Handler | Pick your server and alert channel. |
-| `OLLAMA_HOST` | *Ask Ollama* in 07 Triage | Hostname or IP of your Ollama server (port 11434 is already in the URL). |
-| `OLLAMA_MODEL` | *Build Prompts* in 07 Triage | The Ollama model to use, for example a small instruct model that can return JSON. |
+| `DISCORD_GUILD_ID`, `DISCORD_ALERTS_CHANNEL_ID` | Discord nodes in the Orchestrator, 08, CVE Watch, Housekeeping, Scope Expiry Watch, Client Report and the Error Handler | Pick your server and alert channel. |
+| `OLLAMA_HOST` | *Ask Ollama* in 07 Triage and Client Report | Hostname or IP of your Ollama server (port 11434 is already in the URL). |
+| `OLLAMA_MODEL` | *Build Prompts* in 07 Triage, *Build Report Data* in Client Report | The Ollama model to use, for example a small instruct model that can return JSON. |
 
 Once the placeholders are set, add an engagement to `asm_scope` and start it from the *Run Engagement* form or with *Run All Now*. The first run sets the baseline, and runs after that only report what has changed.

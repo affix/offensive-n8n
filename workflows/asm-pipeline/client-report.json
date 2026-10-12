@@ -1,0 +1,1008 @@
+{
+  "id": "B7HUlWOSXmTbqln6",
+  "name": "ASM · Client Report",
+  "description": "Form (/form/asm-report): builds a client-ready ASM report for one engagement from asm_scope/runs/assets/findings. Writes PDF, HTML, CSV, JSON to /opt/loot/asm/<eng>/reports/<id>/, logs to asm_reports.",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "authentication": "n8nUserAuth",
+        "formTitle": "ASM: client report",
+        "formDescription": "Builds a client-ready external attack surface report (PDF, plus HTML, CSV and JSON on disk) for one engagement in asm_scope.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Engagement",
+              "fieldName": "engagement",
+              "placeholder": "acme",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Client name (as shown on the report)",
+              "fieldName": "client_name",
+              "placeholder": "Acme Ltd"
+            },
+            {
+              "fieldLabel": "Reporting period in days (0 = all time)",
+              "fieldType": "number",
+              "fieldName": "period_days",
+              "defaultValue": "30"
+            },
+            {
+              "fieldLabel": "Minimum severity",
+              "fieldType": "dropdown",
+              "fieldName": "min_severity",
+              "defaultValue": "Low",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Critical"
+                  },
+                  {
+                    "option": "High"
+                  },
+                  {
+                    "option": "Medium"
+                  },
+                  {
+                    "option": "Low"
+                  },
+                  {
+                    "option": "Info"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Hide findings marked false positive",
+              "fieldType": "dropdown",
+              "fieldName": "hide_false_positives",
+              "defaultValue": "Yes",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Yes"
+                  },
+                  {
+                    "option": "No"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Draft executive summary with Ollama",
+              "fieldType": "dropdown",
+              "fieldName": "ai_summary",
+              "defaultValue": "Yes",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Yes"
+                  },
+                  {
+                    "option": "No"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {
+          "appendAttribution": false,
+          "buttonLabel": "Generate report",
+          "path": "asm-report"
+        }
+      },
+      "id": "e4f55dd8-44f6-4632-90f1-8d7727c858b9",
+      "name": "Report Request",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        192
+      ],
+      "webhookId": "da96796c-f772-46ce-8a98-0bb2423ea136"
+    },
+    {
+      "parameters": {
+        "jsCode": "const f = $input.first().json;\nconst engagement = String(f.engagement || '').trim().toLowerCase();\nif (!/^[a-z0-9_-]{1,40}$/.test(engagement)) throw new Error(`Invalid engagement name \"${engagement}\". Use the name from asm_scope.`);\nconst SEVS = ['critical', 'high', 'medium', 'low', 'info'];\nconst minSev = String(f.min_severity || 'Low').toLowerCase();\nconst days = Math.max(0, Math.min(3650, parseInt(f.period_days, 10) || 0));\nconst now = new Date();\nconst stamp = now.toISOString().replace(/[-:]/g, '').replace(/\\.\\d+Z$/, 'Z');\nconst report_id = `${stamp}-${Math.random().toString(16).slice(2, 6)}`;\nreturn [{ json: {\n  engagement,\n  client_name: String(f.client_name || '').trim().slice(0, 120) || engagement,\n  period_days: days,\n  since: days ? new Date(now.getTime() - days * 864e5).toISOString() : null,\n  min_severity: SEVS.includes(minSev) ? minSev : 'low',\n  hide_fp: f.hide_false_positives !== 'No',\n  ai_summary: f.ai_summary !== 'No',\n  requested_by: f.user?.email || f.user?.name || '',\n  report_id,\n  out_dir: `/opt/loot/asm/${engagement}/reports/${report_id}`\n} }];\n"
+      },
+      "id": "73395ab0-f5bf-4d41-9f8e-c4333323aac6",
+      "name": "Report Params",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=D='{{ $json.out_dir }}'\ncase \"$D\" in /opt/loot/asm/*/reports/*) ;; *) echo 'bad path' >&2; exit 1;; esac\nmkdir -p -m 750 \"$D\" && echo ok"
+      },
+      "id": "e8804d5e-a7b8-4553-a822-cbb1aeb34ca1",
+      "name": "Make Report Dir",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        496,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_scope",
+          "cachedResultName": "asm_scope"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "engagement",
+              "keyValue": "={{ $('Report Params').first().json.engagement }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "3b5e8528-2c9d-4630-8225-6ea1837e2305",
+      "name": "Get Scope",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        320
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_runs",
+          "cachedResultName": "asm_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "engagement",
+              "keyValue": "={{ $('Report Params').first().json.engagement }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "02ca6707-c271-4d6b-a787-c5d8651eccf0",
+      "name": "Get Runs",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        944,
+        320
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_assets",
+          "cachedResultName": "asm_assets"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "engagement",
+              "keyValue": "={{ $('Report Params').first().json.engagement }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "ff548a17-5fa1-4875-85bf-654ca543e1ba",
+      "name": "Get Assets",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1168,
+        320
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_findings",
+          "cachedResultName": "asm_findings"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "engagement",
+              "keyValue": "={{ $('Report Params').first().json.engagement }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "30cd0eb4-4b2c-420d-89bb-a31cffca2804",
+      "name": "Get Findings",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1392,
+        320
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $('Report Params').first().json;\nconst rows = (n) => $(n).all().map((i) => i.json).filter((r) => r && r.engagement === p.engagement);\nconst RANK = { critical: 4, high: 3, medium: 2, low: 1, info: 0, unknown: -1 };\nconst SEVS = ['critical', 'high', 'medium', 'low', 'info'];\nconst HIDDEN = new Set(['false_positive', 'false-positive', 'fp', 'duplicate', 'invalid', 'not_applicable', 'wont_report']);\nconst RESOLVED = new Set(['fixed', 'resolved', 'closed', 'remediated', 'mitigated']);\nconst RISKY = {\n  21: 'FTP', 23: 'Telnet', 69: 'TFTP', 111: 'RPCbind', 135: 'MS-RPC', 139: 'NetBIOS', 389: 'LDAP', 445: 'SMB', 873: 'rsync',\n  1433: 'MSSQL', 1521: 'Oracle DB', 2049: 'NFS', 2375: 'Docker API (plain)', 2376: 'Docker API', 3306: 'MySQL', 3389: 'RDP',\n  5432: 'PostgreSQL', 5900: 'VNC', 5984: 'CouchDB', 5985: 'WinRM', 5986: 'WinRM', 6379: 'Redis', 6443: 'Kubernetes API',\n  9200: 'Elasticsearch', 10250: 'Kubelet', 11211: 'Memcached', 27017: 'MongoDB'\n};\n\nconst scope = rows('Get Scope');\nif (!scope.length) throw new Error(`Engagement \"${p.engagement}\" is not in asm_scope`);\nconst since = p.since ? new Date(p.since) : null;\nconst inPeriod = (d) => !since || (d && new Date(d) >= since);\nconst sev = (s) => (RANK[String(s || '').toLowerCase()] !== undefined ? String(s).toLowerCase() : 'unknown');\nconst minRank = RANK[p.min_severity] ?? RANK.low;\n\nconst runs = rows('Get Runs').sort((a, b) => String(b.started).localeCompare(String(a.started)));\nconst periodRuns = runs.filter((r) => inPeriod(r.started));\nconst assets = rows('Get Assets');\n\nconst remediation = (f) => {\n  const t = `${f.source} ${f.template_id} ${f.name}`.toLowerCase();\n  if (f.source === 'takeover' || t.includes('takeover')) return 'Remove or repoint the dangling DNS record, or reclaim the third-party resource it points to.';\n  if (f.source === 'cve-watch' || /cve-\\d{4}-\\d+/.test(t)) return 'Confirm the running version and apply the vendor patch or upgrade. Prioritise anything on the CISA KEV list.';\n  if (t.includes('default-login') || t.includes('default login')) return 'Change default credentials, restrict the interface to trusted networks and enforce MFA where supported.';\n  if (f.source === 'dalfox' || t.includes('xss')) return 'Apply context-aware output encoding and input validation; deploy a restrictive Content-Security-Policy.';\n  if (f.source === 'ffuf' || /\\.git|\\.env|backup|actuator|swagger|exposure/.test(t)) return 'Remove the file or endpoint from the web root, or restrict it with authentication or network controls. Rotate any secrets it exposed.';\n  if (t.includes('misconfig')) return 'Harden the service configuration in line with vendor guidance.';\n  return 'Validate the finding and remediate in line with vendor guidance.';\n};\nconst confidence = (f) => {\n  const note = String(f.triage_note || '').toLowerCase();\n  if (note.includes('version not confirmed') || note.includes('unversioned')) return 'Unconfirmed';\n  if (f.triage_fp_likelihood != null && f.triage_fp_likelihood >= 80) return 'Low';\n  if (f.source === 'cve-watch') return 'Version match';\n  return 'Detected';\n};\n\nconst all = rows('Get Findings').map((f) => ({\n  ...f,\n  severity: sev(f.severity),\n  status: String(f.status || 'new').toLowerCase(),\n  confidence: confidence(f),\n  remediation: remediation(f),\n  is_new: inPeriod(f.first_seen)\n}));\nconst visible = all.filter((f) => !(p.hide_fp && HIDDEN.has(f.status)));\nconst resolved = visible.filter((f) => RESOLVED.has(f.status));\nconst open = visible\n  .filter((f) => !RESOLVED.has(f.status) && (RANK[f.severity] ?? -1) >= minRank)\n  .sort((a, b) => (RANK[b.severity] ?? -1) - (RANK[a.severity] ?? -1) || String(a.host).localeCompare(String(b.host)));\n\nconst bySev = Object.fromEntries(SEVS.map((s) => [s, open.filter((f) => f.severity === s).length]));\nconst rated = open.filter((f) => f.confidence !== 'Low');\nconst worst = SEVS.find((s) => s !== 'info' && rated.some((f) => f.severity === s));\nconst rating = worst ? worst.charAt(0).toUpperCase() + worst.slice(1) : 'Low';\n\nconst ports = assets.filter((a) => a.kind === 'port').sort((a, b) => String(a.ip).localeCompare(String(b.ip)) || a.port - b.port);\nconst web = assets.filter((a) => a.kind === 'web').sort((a, b) => String(a.url).localeCompare(String(b.url)));\nconst hostSet = new Set();\nfor (const a of assets) for (const h of [a.host, a.ip]) if (h) hostSet.add(h);\nconst ipSet = new Set(assets.map((a) => a.ip).filter(Boolean));\nconst exposures = ports.filter((a) => RISKY[a.port]).map((a) => ({ ip: a.ip, host: a.host, port: a.port, label: RISKY[a.port], service: a.service }));\n\nconst techCount = {};\nfor (const w of web) for (const t of String(w.tech || '').split(/[,;|]/).map((s) => s.trim()).filter(Boolean)) techCount[t] = (techCount[t] || 0) + 1;\nconst tech = Object.entries(techCount).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([name, count]) => ({ name, count }));\n\nconst report = {\n  report_id: p.report_id,\n  engagement: p.engagement,\n  client_name: p.client_name,\n  generated: new Date().toISOString(),\n  period_days: p.period_days,\n  since: p.since,\n  min_severity: p.min_severity,\n  rating,\n  scope: scope.map((s) => ({ asset: s.asset, type: s.asset_type || '', exclude: !!s.exclude, enabled: !!s.enabled })),\n  scope_start: scope.map((s) => s.scope_start).filter(Boolean).sort()[0] || null,\n  scope_end: scope.map((s) => s.scope_end).filter(Boolean).sort().slice(-1)[0] || null,\n  intrusive: scope.filter((s) => !s.exclude).every((s) => s.allow_intrusive === true),\n  stats: {\n    hosts: hostSet.size,\n    ips: ipSet.size,\n    ports: ports.length,\n    web: web.length,\n    runs_total: runs.length,\n    runs_period: periodRuns.length,\n    runs_ok: periodRuns.filter((r) => r.status === 'ok').length,\n    last_run: runs[0]?.finished || runs[0]?.started || null,\n    first_run: runs.length ? runs[runs.length - 1].started : null,\n    assets_new_period: assets.filter((a) => inPeriod(a.first_seen)).length,\n    findings_open: open.length,\n    findings_new_period: open.filter((f) => f.is_new).length,\n    findings_resolved: resolved.length,\n    by_severity: bySev\n  },\n  findings: open.map((f) => ({\n    severity: f.severity, name: f.name || f.template_id, template_id: f.template_id, source: f.source, host: f.host,\n    location: f.matched_at || f.url, status: f.status, confidence: f.confidence, remediation: f.remediation,\n    note: f.triage_note || '', first_seen: f.first_seen, last_seen: f.last_seen, is_new: f.is_new, evidence_dir: f.evidence_dir\n  })),\n  resolved: resolved.map((f) => ({ severity: f.severity, name: f.name || f.template_id, host: f.host, status: f.status, last_seen: f.last_seen })),\n  exposures,\n  ports: ports.map((a) => ({ ip: a.ip, host: a.host, port: a.port, service: a.service, first_seen: a.first_seen, last_seen: a.last_seen })),\n  web: web.map((a) => ({ url: a.url, status_code: a.status_code, title: a.title, tech: a.tech, first_seen: a.first_seen, last_seen: a.last_seen })),\n  tech,\n  runs: periodRuns.slice(0, 50).map((r) => ({ run_id: r.run_id, trigger: r.trigger, status: r.status, started: r.started, finished: r.finished, hosts: r.hosts, assets_new: r.assets_new, assets_changed: r.assets_changed, findings_new: r.findings_new }))\n};\n\nconst facts = [\n  `Client: ${report.client_name}`,\n  `Reporting period: ${p.period_days ? `last ${p.period_days} days` : 'all time'}`,\n  `Overall rating: ${rating}`,\n  `Assets: ${report.stats.hosts} hosts/IPs, ${report.stats.ports} open ports, ${report.stats.web} web endpoints`,\n  `Open findings by severity: ${SEVS.map((s) => `${s} ${bySev[s]}`).join(', ')}`,\n  `New findings this period: ${report.stats.findings_new_period}; resolved: ${report.stats.findings_resolved}`,\n  `Exposed sensitive services: ${exposures.length ? exposures.slice(0, 15).map((e) => `${e.label} on ${e.ip}:${e.port}`).join('; ') : 'none'}`,\n  'Top findings:',\n  ...open.filter((f) => f.severity !== 'info').slice(0, 15).map((f) => `- [${f.severity}] ${f.name || f.template_id} on ${f.host} (confidence: ${f.confidence})`)\n].join('\\n');\n\nconst SYSTEM = [\n  'You write the executive summary of an external attack surface management report for a client of a penetration testing consultancy.',\n  'Audience: non-technical leadership. Use British English. Be factual and measured: only use the facts given, never invent assets, numbers or findings.',\n  'Where a finding has confidence \"Unconfirmed\", say it needs verification rather than stating it as fact.',\n  'Reply with JSON only, exactly this shape:',\n  '{\"summary\": \"<two or three short paragraphs separated by \\\\n\\\\n, max 220 words in total>\", \"priorities\": [\"<up to 5 short prioritised actions>\"]}'\n].join('\\n');\n\nreturn [{ json: {\n  report,\n  ollama: {\n    model: 'OLLAMA_MODEL',\n    stream: false,\n    think: false,\n    format: 'json',\n    keep_alive: '15m',\n    options: { temperature: 0.2, num_predict: 700 },\n    messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: facts }]\n  }\n} }];\n"
+      },
+      "id": "b5dc8440-612d-40da-ab9b-a6d23536ad8b",
+      "name": "Build Report Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1616,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Report Params').first().json.ai_summary }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "175c717a-5249-4665-9974-928746a3b60d",
+      "name": "AI Summary?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        976,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://OLLAMA_HOST:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.ollama) }}",
+        "options": {
+          "timeout": 240000
+        }
+      },
+      "id": "50b52b2c-07fd-4a42-a473-56fa8734266d",
+      "name": "Ask Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        128
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = $('Build Report Data').first().json.report;\nconst p = $('Report Params').first().json;\nconst SEVS = ['critical', 'high', 'medium', 'low', 'info'];\nconst COLOUR = { critical: '#7b1020', high: '#c0392b', medium: '#d68910', low: '#2e86c1', info: '#7f8c8d', unknown: '#7f8c8d' };\nconst esc = (s) => String(s ?? '').replace(/[&<>\"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c]));\nconst day = (d) => (d ? new Date(d).toISOString().slice(0, 10) : '');\nconst cap = (s) => String(s).charAt(0).toUpperCase() + String(s).slice(1);\nconst pill = (s) => `<span class=\"pill\" style=\"background:${COLOUR[s] || COLOUR.unknown}\">${esc(cap(s))}</span>`;\nconst csvCell = (v) => { const s = String(v ?? ''); return /[\",\\n\\r]/.test(s) ? `\"${s.replace(/\"/g, '\"\"')}\"` : s; };\nconst csv = (cols, rows) => [cols.join(','), ...rows.map((x) => cols.map((c) => csvCell(x[c])).join(','))].join('\\r\\n') + '\\r\\n';\nconst s = r.stats;\nconst n = (c, one, many) => `${c} ${c === 1 ? one : many}`;\n\nlet summary = '';\nlet priorities = [];\nlet aiUsed = false;\nconst raw = $input.first().json?.message?.content;\nif (raw) {\n  try {\n    const m = String(raw).match(/\\{[\\s\\S]*\\}/);\n    const parsed = JSON.parse(m ? m[0] : raw);\n    summary = String(parsed.summary || '').trim();\n    priorities = (Array.isArray(parsed.priorities) ? parsed.priorities : []).map((x) => String(x).trim()).filter(Boolean).slice(0, 5);\n    aiUsed = !!summary;\n  } catch (e) {}\n}\nif (!summary) {\n  const sevLine = SEVS.filter((x) => x !== 'info' && s.by_severity[x]).map((x) => `${s.by_severity[x]} ${x}`).join(', ');\n  summary = [\n    `During ${r.period_days ? `the last ${r.period_days} days` : 'the monitoring period'} we continuously monitored the external attack surface of ${r.client_name}. ` +\n      `${n(s.runs_period, 'automated assessment run was', 'automated assessment runs were')} completed, covering ${n(s.hosts, 'host or IP address', 'hosts and IP addresses')}, ${n(s.ports, 'open network port', 'open network ports')} and ${n(s.web, 'web endpoint', 'web endpoints')}.`,\n    sevLine\n      ? `There ${s.findings_open === 1 ? 'is' : 'are'} currently ${n(s.findings_open, 'open finding', 'open findings')} (${sevLine}), of which ${s.findings_new_period} ${s.findings_new_period === 1 ? 'was' : 'were'} first identified during this period. The overall external risk rating is ${r.rating}.`\n      : `No findings of low severity or above are currently open. The overall external risk rating is ${r.rating}.`,\n    r.exposures.length\n      ? `${r.exposures.length} sensitive service${r.exposures.length === 1 ? ' is' : 's are'} reachable from the internet and should be reviewed to confirm the exposure is intended.`\n      : 'No commonly targeted management or database services were found exposed to the internet.'\n  ].join('\\n\\n');\n}\nif (!priorities.length) {\n  priorities = r.findings.filter((f) => ['critical', 'high'].includes(f.severity)).slice(0, 3).map((f) => `${f.name} on ${f.host}: ${f.remediation}`);\n  if (r.exposures.length) priorities.push(`Review the ${r.exposures.length} exposed sensitive service${r.exposures.length === 1 ? '' : 's'} and restrict access to trusted networks.`);\n  if (!priorities.length) priorities.push('Maintain continuous monitoring and review new assets as they appear.');\n}\n\nconst findingRows = r.findings.map((f, i) => `\n<tr>\n  <td>F-${String(i + 1).padStart(3, '0')}</td>\n  <td>${pill(f.severity)}</td>\n  <td><strong>${esc(f.name)}</strong>${f.is_new ? ' <span class=\"new\">NEW</span>' : ''}<div class=\"muted\">${esc(f.template_id)} · ${esc(f.source)}</div></td>\n  <td class=\"mono\">${esc(f.host)}<div class=\"muted break\">${esc(f.location)}</div></td>\n  <td>${esc(f.confidence)}</td>\n  <td>${esc(day(f.first_seen))}</td>\n</tr>`).join('');\n\nconst detail = r.findings.filter((f) => f.severity !== 'info').map((f, i) => `\n<div class=\"finding\" style=\"border-left-color:${COLOUR[f.severity]}\">\n  <h3>F-${String(r.findings.indexOf(f) + 1).padStart(3, '0')} · ${esc(f.name)} ${pill(f.severity)}</h3>\n  <table class=\"kv\">\n    <tr><th>Affected asset</th><td class=\"mono break\">${esc(f.location || f.host)}</td></tr>\n    <tr><th>Detection</th><td>${esc(f.source)} / ${esc(f.template_id)}</td></tr>\n    <tr><th>Confidence</th><td>${esc(f.confidence)}</td></tr>\n    <tr><th>First / last seen</th><td>${esc(day(f.first_seen))} / ${esc(day(f.last_seen))}</td></tr>\n    <tr><th>Status</th><td>${esc(cap(f.status))}</td></tr>\n    ${f.note ? `<tr><th>Notes</th><td>${esc(f.note)}</td></tr>` : ''}\n    <tr><th>Recommendation</th><td>${esc(f.remediation)}</td></tr>\n  </table>\n</div>`).join('');\n\nconst sevBars = SEVS.map((x) => {\n  const max = Math.max(1, ...SEVS.map((y) => s.by_severity[y]));\n  return `<div class=\"bar\"><span class=\"lbl\">${cap(x)}</span><span class=\"track\"><span class=\"fill\" style=\"width:${(s.by_severity[x] / max) * 100}%;background:${COLOUR[x]}\"></span></span><span class=\"num\">${s.by_severity[x]}</span></div>`;\n}).join('');\n\nconst table = (cols, rows, empty) => rows.length\n  ? `<table class=\"grid\"><thead><tr>${cols.map((c) => `<th>${esc(c[0])}</th>`).join('')}</tr></thead><tbody>${rows.map((x) => `<tr>${cols.map((c) => `<td class=\"${c[2] || ''}\">${c[1](x)}</td>`).join('')}</tr>`).join('')}</tbody></table>`\n  : `<p class=\"muted\">${esc(empty)}</p>`;\n\nconst html = `<!doctype html>\n<html lang=\"en-GB\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>${esc(r.client_name)} · External Attack Surface Report</title>\n<style>\n@page { size: A4; margin: 16mm 14mm; }\n:root { --ink:#1c2430; --muted:#5d6b7a; --line:#dfe4ea; --accent:#1f3a5f; --bg:#ffffff; --soft:#f4f6f9; }\n* { box-sizing: border-box; }\nbody { margin:0; background:var(--bg); color:var(--ink); font:10.5pt/1.5 -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif; }\nmain { max-width: 1000px; margin: 0 auto; padding: 24px 16px; }\nh1 { font-size: 26pt; margin: 0 0 4px; color: var(--accent); }\nh2 { font-size: 15pt; color: var(--accent); border-bottom: 2px solid var(--accent); padding-bottom: 4px; margin: 28px 0 12px; break-after: avoid; }\nh3 { font-size: 11.5pt; margin: 0 0 8px; }\n.cover { min-height: 60vh; break-after: page; display:flex; flex-direction:column; justify-content:center; border-bottom: 6px solid var(--accent); margin-bottom: 24px; }\n.cover .sub { font-size: 14pt; color: var(--muted); }\n.meta { margin-top: 24px; color: var(--muted); }\n.conf { margin-top: 32px; font-size: 9pt; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }\n.cards { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 12px 0; }\n.card { background: var(--soft); border-radius: 6px; padding: 10px 12px; }\n.card .v { font-size: 18pt; font-weight: 700; color: var(--accent); }\n.card .k { font-size: 8.5pt; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }\n.rating { display:inline-block; padding: 4px 14px; border-radius: 4px; color:#fff; font-weight:700; }\n.pill { display:inline-block; color:#fff; border-radius: 3px; padding: 0 6px; font-size: 8.5pt; font-weight: 600; vertical-align: middle; }\n.new { color:#c0392b; font-size: 8pt; font-weight:700; }\n.muted { color: var(--muted); font-size: 8.5pt; }\n.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 8.5pt; }\n.break { word-break: break-all; }\ntable { border-collapse: collapse; width: 100%; }\n.grid th, .grid td { border-bottom: 1px solid var(--line); padding: 5px 6px; text-align:left; vertical-align: top; font-size: 9pt; }\n.grid th { background: var(--soft); font-size: 8.5pt; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }\n.grid tr { break-inside: avoid; }\n.kv th { width: 150px; text-align:left; color: var(--muted); font-weight: 600; padding: 3px 8px 3px 0; vertical-align: top; font-size: 9pt; }\n.kv td { padding: 3px 0; font-size: 9pt; }\n.finding { border-left: 4px solid; background: var(--soft); padding: 10px 14px; margin: 10px 0; border-radius: 0 6px 6px 0; break-inside: avoid; }\n.bar { display:flex; align-items:center; gap:8px; margin: 3px 0; }\n.bar .lbl { width: 70px; font-size: 9pt; }\n.bar .track { flex:1; background: var(--soft); height: 12px; border-radius: 3px; overflow:hidden; }\n.bar .fill { display:block; height:100%; }\n.bar .num { width: 30px; text-align:right; font-weight:600; }\n.summary p { margin: 0 0 10px; }\nol li { margin-bottom: 4px; }\n.pb { break-before: page; }\n.foot { margin-top: 32px; border-top: 1px solid var(--line); padding-top: 8px; font-size: 8pt; color: var(--muted); }\n@media screen and (max-width: 640px) { .grid { display:block; overflow-x:auto; } .kv th { width: 110px; } h1 { font-size: 20pt; } }\n@media (prefers-color-scheme: dark) { @media screen { :root { --ink:#e3e8ef; --muted:#9aa8b8; --line:#2c3644; --accent:#8fb8e8; --bg:#11161d; --soft:#1a212b; } } }\n@media print { .cover { min-height: 240mm; border-bottom: 0; border-left: 8px solid var(--accent); padding-left: 24px; } .cards { grid-template-columns: repeat(3, 1fr); } }\n</style></head><body><main>\n\n<section class=\"cover\">\n  <div class=\"conf\">Confidential · Prepared for ${esc(r.client_name)}</div>\n  <h1>External Attack Surface Report</h1>\n  <div class=\"sub\">${esc(r.client_name)}</div>\n  <div class=\"meta\">\n    Reporting period: ${r.since ? `${esc(day(r.since))} to ${esc(day(r.generated))}` : `All monitoring to ${esc(day(r.generated))}`}<br>\n    Report reference: ${esc(r.engagement)}/${esc(r.report_id)}<br>\n    Generated: ${esc(r.generated.replace('T', ' ').slice(0, 16))} UTC\n  </div>\n</section>\n\n<h2>1. Executive summary</h2>\n<p>Overall external risk rating: <span class=\"rating\" style=\"background:${COLOUR[r.rating.toLowerCase()] || COLOUR.low}\">${esc(r.rating)}</span></p>\n<div class=\"summary\">${summary.split(/\\n{2,}/).map((x) => `<p>${esc(x)}</p>`).join('')}</div>\n<div class=\"cards\">\n  <div class=\"card\"><div class=\"v\">${s.hosts}</div><div class=\"k\">Hosts and IPs</div></div>\n  <div class=\"card\"><div class=\"v\">${s.ports}</div><div class=\"k\">Open ports</div></div>\n  <div class=\"card\"><div class=\"v\">${s.web}</div><div class=\"k\">Web endpoints</div></div>\n  <div class=\"card\"><div class=\"v\">${s.findings_open}</div><div class=\"k\">Open findings</div></div>\n  <div class=\"card\"><div class=\"v\">${s.findings_new_period}</div><div class=\"k\">New this period</div></div>\n  <div class=\"card\"><div class=\"v\">${s.runs_period}</div><div class=\"k\">Assessment runs</div></div>\n</div>\n<h3>Open findings by severity</h3>\n${sevBars}\n<h3 style=\"margin-top:16px\">Priority actions</h3>\n<ol>${priorities.map((x) => `<li>${esc(x)}</li>`).join('')}</ol>\n${aiUsed ? '<p class=\"muted\">The narrative summary was drafted with the assistance of a locally hosted language model and reviewed against the underlying data.</p>' : ''}\n\n<h2 class=\"pb\">2. Scope and methodology</h2>\n<p>The following assets were in scope. Excluded assets were removed from every stage of testing.</p>\n${table([['Asset', (x) => esc(x.asset), 'mono'], ['Type', (x) => esc(x.type || 'auto')], ['Treatment', (x) => (x.exclude ? 'Excluded' : 'In scope')]], r.scope, 'No scope recorded.')}\n<p>${r.scope_start || r.scope_end ? `Authorised testing window: ${esc(day(r.scope_start) || 'open')} to ${esc(day(r.scope_end) || 'open')}. ` : ''}Intrusive checks were ${r.intrusive ? 'authorised' : '<strong>not</strong> authorised'} for this engagement.</p>\n<p>Monitoring is automated and repeats several times a day. Each run enumerates subdomains from passive sources and DNS resolution, filters every result back through the agreed scope, identifies shared and CDN-fronted infrastructure so that third-party systems are not tested, scans the most common 1,000 TCP ports on in-scope addresses, fingerprints web services, and compares the result with the previous run. Vulnerability checks are then run only against new or changed assets, using curated templates for known CVEs, exposures, misconfigurations, default credentials and subdomain takeover. Fingerprinted software versions are also matched daily against the NVD and the CISA Known Exploited Vulnerabilities catalogue. Denial-of-service and fuzzing checks are never run.</p>\n<p>Findings show a confidence level: <em>Detected</em> means a check matched the live service, <em>Version match</em> means the observed version falls in the vulnerable range, <em>Unconfirmed</em> means the product matched but the version could not be verified, and <em>Low</em> means automated triage considers it likely to be a false positive.</p>\n\n<h2 class=\"pb\">3. Findings overview</h2>\n${r.findings.length ? `<table class=\"grid\"><thead><tr><th>Ref</th><th>Severity</th><th>Finding</th><th>Asset</th><th>Confidence</th><th>First seen</th></tr></thead><tbody>${findingRows}</tbody></table>` : '<p class=\"muted\">No open findings at or above the selected severity.</p>'}\n\n${detail ? `<h2 class=\"pb\">4. Finding detail</h2>${detail}` : ''}\n\n<h2 class=\"pb\">${detail ? 5 : 4}. Attack surface inventory</h2>\n<h3>Internet-exposed sensitive services</h3>\n${table([['Service', (x) => esc(x.label)], ['Address', (x) => esc(`${x.ip}:${x.port}`), 'mono'], ['Hostname', (x) => esc(x.host), 'mono'], ['Detected', (x) => esc(x.service)]], r.exposures, 'None identified.')}\n<h3>Open ports</h3>\n${table([['Address', (x) => esc(x.ip), 'mono'], ['Port', (x) => esc(x.port)], ['Service', (x) => esc(x.service)], ['First seen', (x) => esc(day(x.first_seen))], ['Last seen', (x) => esc(day(x.last_seen))]], r.ports, 'No open ports recorded.')}\n<h3>Web endpoints</h3>\n${table([['URL', (x) => esc(x.url), 'mono break'], ['Status', (x) => esc(x.status_code)], ['Title', (x) => esc(x.title)], ['Technology', (x) => esc(x.tech)]], r.web, 'No web endpoints recorded.')}\n${r.tech.length ? `<h3>Technology observed</h3>${table([['Technology', (x) => esc(x.name)], ['Endpoints', (x) => esc(x.count)]], r.tech, '')}` : ''}\n\n<h2 class=\"pb\">${detail ? 6 : 5}. Monitoring activity</h2>\n${table([['Run', (x) => esc(x.run_id), 'mono'], ['Started', (x) => esc(String(x.started || '').replace('T', ' ').slice(0, 16))], ['Status', (x) => esc(x.status)], ['Hosts', (x) => esc(x.hosts)], ['New assets', (x) => esc(x.assets_new)], ['Changed', (x) => esc(x.assets_changed)], ['New findings', (x) => esc(x.findings_new)]], r.runs, 'No runs in this period.')}\n${r.resolved.length ? `<h3>Resolved findings</h3>${table([['Severity', (x) => pill(x.severity)], ['Finding', (x) => esc(x.name)], ['Asset', (x) => esc(x.host), 'mono'], ['Status', (x) => esc(cap(x.status))], ['Last seen', (x) => esc(day(x.last_seen))]], r.resolved, '')}` : ''}\n\n<div class=\"foot\">Automated external attack surface monitoring results reflect the state of internet-facing assets at the time of each scan and are not a substitute for a full penetration test. ${esc(r.client_name)} · ${esc(r.engagement)}/${esc(r.report_id)}</div>\n</main></body></html>`;\n\nconst findingsCsv = csv(['severity', 'name', 'template_id', 'source', 'host', 'location', 'confidence', 'status', 'first_seen', 'last_seen', 'remediation', 'note'], r.findings);\nconst assetsCsv = csv(['kind', 'ip', 'host', 'port', 'service', 'url', 'status_code', 'title', 'tech', 'first_seen', 'last_seen'],\n  [...r.ports.map((x) => ({ kind: 'port', ...x })), ...r.web.map((x) => ({ kind: 'web', ...x }))]);\nconst bin = (str, fileName, mimeType) => ({ data: Buffer.from(str, 'utf8').toString('base64'), mimeType, fileName, fileExtension: fileName.split('.').pop() });\n\nreturn [{\n  json: { report_id: r.report_id, out_dir: p.out_dir, ai_used: aiUsed, rating: r.rating, findings: r.findings.length },\n  binary: {\n    report_html: bin(html, 'report.html', 'text/html'),\n    findings_csv: bin(findingsCsv, 'findings.csv', 'text/csv'),\n    assets_csv: bin(assetsCsv, 'assets.csv', 'text/csv'),\n    report_json: bin(JSON.stringify({ ...r, executive_summary: summary, priorities }, null, 2), 'report.json', 'application/json')\n  }\n}];\n"
+      },
+      "id": "131b24b3-1ab0-4f65-9712-3954b2313e00",
+      "name": "Render Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1424,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $('Report Params').first().json.out_dir }}/report.html",
+        "dataPropertyName": "report_html",
+        "options": {}
+      },
+      "id": "7445b581-67ac-43a7-9b24-1b7bd6001841",
+      "name": "Write HTML",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        1584,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $('Report Params').first().json.out_dir }}/findings.csv",
+        "dataPropertyName": "findings_csv",
+        "options": {}
+      },
+      "id": "370ca3fb-a489-4544-a33b-3c05444d41e3",
+      "name": "Write Findings CSV",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        1808,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $('Report Params').first().json.out_dir }}/assets.csv",
+        "dataPropertyName": "assets_csv",
+        "options": {}
+      },
+      "id": "68c259be-2296-48ec-9acc-7aaea8b09e0f",
+      "name": "Write Assets CSV",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        2032,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $('Report Params').first().json.out_dir }}/report.json",
+        "dataPropertyName": "report_json",
+        "options": {}
+      },
+      "id": "f581020c-66d2-4b3b-b1c8-d82b18e1f13f",
+      "name": "Write Report JSON",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        2256,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=D='{{ $('Report Params').first().json.out_dir }}'\nIMG='zenika/alpine-chrome:124'\ncase \"$D\" in /opt/loot/asm/*/reports/*) ;; *) echo 'bad path' >&2; exit 1;; esac\ndocker image inspect \"$IMG\" >/dev/null 2>&1 || timeout 600 docker pull -q \"$IMG\" >\"$D/pdf.log\" 2>&1\nif timeout 180 docker run --rm --network none --user \"$(id -u):$(id -g)\" -e HOME=/tmp -v \"$D:/work\" \"$IMG\" --no-sandbox --headless --disable-gpu --disable-dev-shm-usage --no-pdf-header-footer --print-to-pdf=/work/report.pdf file:///work/report.html >>\"$D/pdf.log\" 2>&1 && [ -s \"$D/report.pdf\" ]; then echo pdf; else echo html; fi"
+      },
+      "id": "08453016-3aa0-45e5-8556-6104b80689c8",
+      "name": "Render PDF",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        2480,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ $('Report Params').first().json.out_dir }}/report.{{ $json.stdout.trim() === 'pdf' ? 'pdf' : 'html' }}",
+        "options": {
+          "fileName": "={{ $('Report Params').first().json.engagement }}-asm-report-{{ $now.toFormat('yyyy-MM-dd') }}.{{ $json.stdout.trim() === 'pdf' ? 'pdf' : 'html' }}",
+          "dataPropertyName": "data"
+        }
+      },
+      "id": "ae584209-34a5-4e8e-b50d-f809879a1a8c",
+      "name": "Read Deliverable",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        2704,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_asm_reports",
+          "cachedResultName": "asm_reports"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "report_id": "={{ $('Report Params').first().json.report_id }}",
+            "engagement": "={{ $('Report Params').first().json.engagement }}",
+            "client_name": "={{ $('Report Params').first().json.client_name }}",
+            "requested_by": "={{ $('Report Params').first().json.requested_by }}",
+            "period_days": "={{ $('Report Params').first().json.period_days }}",
+            "min_severity": "={{ $('Report Params').first().json.min_severity }}",
+            "ai_summary": "={{ $('Render Report').first().json.ai_used }}",
+            "out_dir": "={{ $('Report Params').first().json.out_dir }}",
+            "findings": "={{ $('Build Report Data').first().json.report.stats.findings_open }}",
+            "critical": "={{ $('Build Report Data').first().json.report.stats.by_severity.critical }}",
+            "high": "={{ $('Build Report Data').first().json.report.stats.by_severity.high }}",
+            "assets": "={{ $('Build Report Data').first().json.report.stats.ports + $('Build Report Data').first().json.report.stats.web }}",
+            "rating": "={{ $('Build Report Data').first().json.report.rating }}",
+            "pdf": "={{ $('Render PDF').first().json.stdout.trim() === 'pdf' }}",
+            "generated": "={{ $now.toISO() }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "report_id",
+              "displayName": "report_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "engagement",
+              "displayName": "engagement",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "client_name",
+              "displayName": "client_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "requested_by",
+              "displayName": "requested_by",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "period_days",
+              "displayName": "period_days",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "min_severity",
+              "displayName": "min_severity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "ai_summary",
+              "displayName": "ai_summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "out_dir",
+              "displayName": "out_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "findings",
+              "displayName": "findings",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "critical",
+              "displayName": "critical",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "high",
+              "displayName": "high",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "assets",
+              "displayName": "assets",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "rating",
+              "displayName": "rating",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "pdf",
+              "displayName": "pdf",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "boolean",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "generated",
+              "displayName": "generated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "c98f5cb0-28d3-4463-a0fb-b5af02f4c359",
+      "name": "Log Report",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2176,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify({ title: '📄 ASM report ready · ' + $('Report Params').first().json.client_name, color: 0x1F3A5F, fields: [{ name: 'Engagement', value: '`' + $('Report Params').first().json.engagement + '`', inline: true }, { name: 'Rating', value: $('Build Report Data').first().json.report.rating, inline: true }, { name: 'Open findings', value: String($('Build Report Data').first().json.report.stats.findings_open), inline: true }, { name: 'Output', value: '`' + $('Report Params').first().json.out_dir + '`' + ($('Render PDF').first().json.stdout.trim() === 'pdf' ? '' : ' (PDF render failed, HTML only)') }], footer: { text: 'ASM · Client Report' + ($('Report Params').first().json.requested_by ? ' · ' + $('Report Params').first().json.requested_by : '') }, timestamp: $now.toISO() }) }}"
+            }
+          ]
+        },
+        "files": {
+          "values": [
+            {
+              "inputFieldName": "data"
+            }
+          ]
+        }
+      },
+      "id": "9680bcf6-b459-4e0d-9909-f5efda0d4382",
+      "name": "Post Report Ready",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        2192,
+        192
+      ],
+      "webhookId": "351fc99f-d774-4fcc-8905-9cd316723923",
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Report Request').first().json.formMode }}",
+              "rightValue": "mcp",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c7eab4f0-f7d2-4af5-a5d8-841a002315c7",
+      "name": "From Browser?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2440,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "respondWith": "returnBinary",
+        "completionTitle": "Report ready",
+        "completionMessage": "={{ 'Saved to ' + $('Report Params').first().json.out_dir }}",
+        "options": {}
+      },
+      "id": "81339fac-acb6-4e4b-94a1-f97e1f1e22a2",
+      "name": "Return Report",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        2660,
+        432
+      ],
+      "webhookId": "8153cc41-729b-40d5-be35-4c275975d61a"
+    },
+    {
+      "parameters": {
+        "content": "## ASM · Client Report\nForm at `/form/asm-report` (n8n login). Pulls `asm_scope`, `asm_runs`, `asm_assets` and `asm_findings` for one engagement, renders a client report and writes `report.html`, `report.pdf`, `findings.csv`, `assets.csv` and `report.json` to `/opt/loot/asm/<engagement>/reports/<id>/`.\n\nPDF is rendered by headless Chrome in `zenika/alpine-chrome:124` with no network. If that fails the form returns the HTML instead. The Ollama summary is optional; without it a deterministic summary is used.",
+        "color": 4
+      },
+      "id": "2d9f3449-0fc3-4fd0-8b0a-39d4220b8521",
+      "name": "Sticky Note 15c6ad05",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1344,
+        384
+      ]
+    }
+  ],
+  "connections": {
+    "Report Request": {
+      "main": [
+        [
+          {
+            "node": "Report Params",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Params": {
+      "main": [
+        [
+          {
+            "node": "Make Report Dir",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Make Report Dir": {
+      "main": [
+        [
+          {
+            "node": "Get Scope",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Scope": {
+      "main": [
+        [
+          {
+            "node": "Get Runs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Runs": {
+      "main": [
+        [
+          {
+            "node": "Get Assets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Assets": {
+      "main": [
+        [
+          {
+            "node": "Get Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Findings": {
+      "main": [
+        [
+          {
+            "node": "Build Report Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Report Data": {
+      "main": [
+        [
+          {
+            "node": "AI Summary?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Summary?": {
+      "main": [
+        [
+          {
+            "node": "Ask Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Render Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Ollama": {
+      "main": [
+        [
+          {
+            "node": "Render Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render Report": {
+      "main": [
+        [
+          {
+            "node": "Write HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write HTML": {
+      "main": [
+        [
+          {
+            "node": "Write Findings CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Findings CSV": {
+      "main": [
+        [
+          {
+            "node": "Write Assets CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Assets CSV": {
+      "main": [
+        [
+          {
+            "node": "Write Report JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Report JSON": {
+      "main": [
+        [
+          {
+            "node": "Render PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render PDF": {
+      "main": [
+        [
+          {
+            "node": "Read Deliverable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Deliverable": {
+      "main": [
+        [
+          {
+            "node": "Log Report",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Post Report Ready",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "From Browser?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "From Browser?": {
+      "main": [
+        [
+          {
+            "node": "Return Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "errorWorkflow": "oTbFYlbhb8Dlg0CM",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [
+    {
+      "id": "d3b93775-4833-4bc7-9123-76fbbd689ad9",
+      "name": "Load engagement data",
+      "nodeNames": [
+        "Make Report Dir",
+        "Get Scope",
+        "Get Runs",
+        "Get Assets",
+        "Get Findings",
+        "Build Report Data"
+      ],
+      "description": "Creates the report dir, reads the four asm_* tables for the engagement and builds the report model plus Ollama prompt."
+    },
+    {
+      "id": "05f6eb1f-4b83-4c2b-bf65-4e2d288b1e4c",
+      "name": "Write deliverables",
+      "nodeNames": [
+        "Write HTML",
+        "Write Findings CSV",
+        "Write Assets CSV",
+        "Write Report JSON",
+        "Render PDF",
+        "Read Deliverable"
+      ],
+      "description": "Writes HTML, CSV and JSON to the report dir, renders the PDF in headless Chrome (Docker, no network) and reads it back."
+    },
+    {
+      "id": "65ba7145-678a-4e9e-b966-7283fd0a5e90",
+      "name": "Executive summary",
+      "nodeNames": [
+        "AI Summary?",
+        "Ask Ollama",
+        "Render Report"
+      ],
+      "description": "Optional Ollama-drafted summary (falls back to a deterministic one), then renders the HTML report, CSVs and JSON as binaries."
+    }
+  ],
+  "sourceWorkflowId": null,
+  "tags": []
+}

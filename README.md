@@ -104,7 +104,7 @@ docker run --rm -v /opt/loot:/loot projectdiscovery/katana:v1.8.0 -u https://exa
 
 | Folder | What it does |
 |---|---|
-| [`asm-pipeline`](workflows/asm-pipeline/README.md) | External attack surface pipeline: scoped discovery, takeover checks, port scans, web fingerprinting, diffing, vuln checks, Ollama triage and Discord alerts, plus CVE Watch, housekeeping and scope expiry. |
+| [`asm-pipeline`](workflows/asm-pipeline/README.md) | External attack surface pipeline: scoped discovery, takeover checks, port scans, web fingerprinting, diffing, vuln checks, Ollama triage and Discord alerts, plus CVE Watch, housekeeping, scope expiry and client PDF reports. |
 | [`wazuh-triage`](workflows/wazuh-triage/README.md) | Polls the Wazuh indexer, dedupes and suppresses high-severity alerts, enriches source IPs, LLM-triages the rest and pages only on escalations. Also analyses web honeypot payloads. |
 | [`subdomain-takeover`](workflows/subdomain-takeover/README.md) | Scheduled and one-off subdomain takeover monitoring for a list of root domains. |
 | [`threat-intel`](workflows/threat-intel/README.md) | IP reputation from AbuseIPDB, VirusTotal, GreyNoise and OTX, as a sub-workflow and an IP or domain report form. |
