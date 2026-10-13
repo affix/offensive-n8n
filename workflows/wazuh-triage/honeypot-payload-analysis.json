@@ -27,7 +27,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "CREATE TABLE IF NOT EXISTS honeypot_payloads (\n  payload_hash text PRIMARY KEY,\n  first_seen timestamptz,\n  last_seen timestamptz,\n  count int NOT NULL DEFAULT 0,\n  src_ips text[] NOT NULL DEFAULT '{}',\n  sensors text[] NOT NULL DEFAULT '{}',\n  method text,\n  path text,\n  query text,\n  headers jsonb,\n  body text,\n  detections jsonb,\n  cves text[],\n  categories text[],\n  decoded jsonb,\n  static_iocs jsonb,\n  weight int,\n  sample_alert_id text,\n  analysis jsonb,\n  interest int,\n  analysed_at timestamptz,\n  notified boolean NOT NULL DEFAULT false\n);\nALTER TABLE honeypot_payloads ADD COLUMN IF NOT EXISTS sig_hash text, ADD COLUMN IF NOT EXISTS sig_text text, ADD COLUMN IF NOT EXISTS ioc_keys text[];\nCREATE INDEX IF NOT EXISTS honeypot_payloads_last_seen_idx ON honeypot_payloads (last_seen);\nCREATE INDEX IF NOT EXISTS honeypot_payloads_interest_idx ON honeypot_payloads (interest);\nCREATE INDEX IF NOT EXISTS honeypot_payloads_pending_idx ON honeypot_payloads (weight DESC) WHERE analysed_at IS NULL;\nCREATE INDEX IF NOT EXISTS honeypot_payloads_sig_idx ON honeypot_payloads (sig_hash);\nCREATE INDEX IF NOT EXISTS honeypot_payloads_unsigned_idx ON honeypot_payloads (payload_hash) WHERE sig_hash IS NULL;\nCREATE TABLE IF NOT EXISTS honeypot_signatures (\n  sig_hash text PRIMARY KEY,\n  sig_text text,\n  first_seen timestamptz,\n  last_seen timestamptz,\n  payload_count int NOT NULL DEFAULT 0,\n  event_count bigint NOT NULL DEFAULT 0,\n  sample_payload_hash text,\n  technique text,\n  alert_count int NOT NULL DEFAULT 0,\n  first_alerted timestamptz,\n  last_alerted timestamptz\n);\nCREATE TABLE IF NOT EXISTS honeypot_iocs (\n  ioc text PRIMARY KEY,\n  first_seen timestamptz NOT NULL DEFAULT now(),\n  last_seen timestamptz NOT NULL DEFAULT now(),\n  payload_count int NOT NULL DEFAULT 0,\n  first_payload text,\n  alerted_at timestamptz\n);",
+        "query": "CREATE TABLE IF NOT EXISTS honeypot_payloads (\n  payload_hash text PRIMARY KEY,\n  first_seen timestamptz,\n  last_seen timestamptz,\n  count int NOT NULL DEFAULT 0,\n  src_ips text[] NOT NULL DEFAULT '{}',\n  sensors text[] NOT NULL DEFAULT '{}',\n  method text,\n  path text,\n  query text,\n  headers jsonb,\n  body text,\n  detections jsonb,\n  cves text[],\n  categories text[],\n  decoded jsonb,\n  static_iocs jsonb,\n  weight int,\n  sample_alert_id text,\n  analysis jsonb,\n  interest int,\n  analysed_at timestamptz,\n  notified boolean NOT NULL DEFAULT false\n);\nALTER TABLE honeypot_payloads ADD COLUMN IF NOT EXISTS sig_hash text, ADD COLUMN IF NOT EXISTS sig_text text, ADD COLUMN IF NOT EXISTS ioc_keys text[], ADD COLUMN IF NOT EXISTS fingerprint text;\nCREATE INDEX IF NOT EXISTS honeypot_payloads_last_seen_idx ON honeypot_payloads (last_seen);\nCREATE INDEX IF NOT EXISTS honeypot_payloads_interest_idx ON honeypot_payloads (interest);\nCREATE INDEX IF NOT EXISTS honeypot_payloads_pending_idx ON honeypot_payloads (weight DESC) WHERE analysed_at IS NULL;\nCREATE INDEX IF NOT EXISTS honeypot_payloads_sig_idx ON honeypot_payloads (sig_hash);\nCREATE INDEX IF NOT EXISTS honeypot_payloads_fingerprint_idx ON honeypot_payloads (fingerprint, analysed_at) WHERE notified;\nCREATE INDEX IF NOT EXISTS honeypot_payloads_unsigned_idx ON honeypot_payloads (payload_hash) WHERE sig_hash IS NULL;\nCREATE TABLE IF NOT EXISTS honeypot_signatures (\n  sig_hash text PRIMARY KEY,\n  sig_text text,\n  first_seen timestamptz,\n  last_seen timestamptz,\n  payload_count int NOT NULL DEFAULT 0,\n  event_count bigint NOT NULL DEFAULT 0,\n  sample_payload_hash text,\n  technique text,\n  alert_count int NOT NULL DEFAULT 0,\n  first_alerted timestamptz,\n  last_alerted timestamptz\n);\nCREATE TABLE IF NOT EXISTS honeypot_iocs (\n  ioc text PRIMARY KEY,\n  first_seen timestamptz NOT NULL DEFAULT now(),\n  last_seen timestamptz NOT NULL DEFAULT now(),\n  payload_count int NOT NULL DEFAULT 0,\n  first_payload text,\n  alerted_at timestamptz\n);",
         "options": {}
       },
       "id": "3509b407-3db7-4142-bf94-1d6cf958ba34",
@@ -135,7 +135,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const hits = (($input.first().json.hits || {}).hits) || [];\nconst SKIP_HEADERS = ['host', 'cookie', 'content-length', 'accept', 'accept-encoding', 'accept-language', 'connection', 'x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host', 'x-forwarded-port', 'x-real-ip', 'x-envoy-external-address', 'x-request-id', 'x-amzn-trace-id', 'cache-control', 'pragma', 'upgrade-insecure-requests', 'user-agent', 'content-type', 'referer', 'origin', 'te', 'priority', 'dnt'];\nconst uniq = (a) => Array.from(new Set(a.filter(Boolean)));\nconst iso = (t) => { const d = new Date(String(t || '').replace(/([+-][0-9]{2})([0-9]{2})$/, '$1:$2')); return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString(); };\nconst validIp = (ip) => ip.split('.').every((o) => Number(o) >= 0 && Number(o) <= 255);\nconst decodeB64 = (b) => {\n  try {\n    const s = Buffer.from(b, 'base64').toString('utf8');\n    const printable = s.replace(/[^ -~]/g, '').length / Math.max(1, s.length);\n    return printable > 0.9 && s.length > 8 ? s.slice(0, 1500) : null;\n  } catch (e) { return null; }\n};\nconst groups = {};\nfor (const h of hits) {\n  const s = h._source || {};\n  const d = s.data || {};\n  const http = d.http || {};\n  const method = String(http.method || '');\n  const path = String(http.path || '').slice(0, 1000);\n  const query = String(http.query || '').slice(0, 2000);\n  const headers = [].concat(http.headers || []).filter((x) => x && x.name && SKIP_HEADERS.indexOf(String(x.name).toLowerCase()) < 0).map((x) => ({ name: String(x.name).toLowerCase(), value: String(x.value || '').slice(0, 2000) }));\n  const body = String(d.body || '').slice(0, 8000);\n  const dets = [].concat(d.detections || []).filter((x) => x && typeof x === 'object').map((x) => ({ id: x.id || '', name: x.name || '', severity: x.severity || '', location: x.location || '', evidence: String(x.evidence || '').slice(0, 500), cves: [].concat(x.cves || []) }));\n  const decoded = [].concat(d.decoded_layers || []).concat([].concat(d.artifacts || []).map((a) => ({ artifact: a })));\n  const interesting = dets.length || body.trim() || decoded.length || query;\n  if (!interesting) continue;\n  const srcIp = String(d.src_ip || d.srcip || '');\n  const text = [query, headers.map((x) => x.value).join(' '), body, JSON.stringify(decoded), dets.map((x) => x.evidence).join(' ')].join(' ');\n  let all = text;\n  try { all += ' ' + decodeURIComponent(text.replace(/[+]/g, ' ')); } catch (e) { all += ''; }\n  const b64 = uniq((all.match(/[A-Za-z0-9+/]{40,}={0,2}/g) || []).slice(0, 8).map(decodeB64));\n  all += ' ' + b64.join(' ');\n  const urls = uniq((all.match(/(?:https?|ftp|tftp|ldaps?|rmi|dns|gopher|iiop|corba):[/][/][^ \"'<>|;(){}]+/gi) || []).map((u) => u.slice(0, 300))).slice(0, 20);\n  const hosts = uniq(urls.map((u) => { try { return new URL(u).hostname; } catch (e) { return ''; } }));\n  const ips = uniq((all.match(/[0-9]{1,3}(?:[.][0-9]{1,3}){3}/g) || []).filter((ip) => validIp(ip) && ip !== srcIp && ip.indexOf('0.') !== 0)).slice(0, 20);\n  const commands = uniq((all.match(/(?:curl|wget|busybox|tftp|chmod|bash -c|sh -c|powershell|certutil|bitsadmin|nc -e|ncat|python[0-9.]* -c|perl -e|base64 -d|echo [A-Za-z0-9+/=]{20,})[^;|&\"'<>]{0,160}/gi) || []).map((c) => c.trim())).slice(0, 15);\n  const iocs = { urls: urls, hosts: hosts.filter((x) => !/^[0-9.]+$/.test(x)), ips: ips, commands: commands, base64: b64.slice(0, 5) };\n  const weight = dets.length * 2 + (urls.length ? 6 : 0) + (commands.length ? 6 : 0) + (b64.length ? 3 : 0) + (decoded.length ? 2 : 0) + (body.trim() ? 1 : 0);\n  const canonical = [method, path, '?' + query, headers.map((x) => x.name + ': ' + x.value).sort().join(' | '), body].join(' || ');\n  const ts = iso(s.timestamp);\n  const sensor = String(d.sensor_host || (s.agent || {}).name || '');\n  const g = groups[canonical];\n  if (g) {\n    g.count += 1;\n    if (ts < g.ts) g.ts = ts;\n    g.src_ips = uniq(g.src_ips.concat([srcIp])).slice(0, 200);\n    g.sensors = uniq(g.sensors.concat([sensor]));\n  } else {\n    groups[canonical] = {\n      canonical: canonical, ts: ts, count: 1, src_ips: uniq([srcIp]), sensors: uniq([sensor]),\n      method: method, path: path, query: query, headers: headers, body: body, detections: dets,\n      cves: uniq([].concat(...dets.map((x) => x.cves)).map((c) => String(c).toUpperCase())),\n      categories: uniq([].concat(d.categories || []).map(String)), decoded: decoded, static_iocs: iocs,\n      weight: weight, sample_alert_id: h._id\n    };\n  }\n}\nconst rows = Object.values(groups);\nif (!rows.length) return [];\nreturn [{ json: { n: rows.length, events: hits.length, rows: JSON.stringify(rows) } }];\n"
+        "jsCode": "const hits = (($input.first().json.hits || {}).hits) || [];\nconst SKIP_HEADERS = ['host', 'cookie', 'content-length', 'accept', 'accept-encoding', 'accept-language', 'connection', 'x-forwarded-for', 'x-forwarded-proto', 'x-forwarded-host', 'x-forwarded-port', 'x-real-ip', 'x-envoy-external-address', 'x-request-id', 'x-amzn-trace-id', 'cache-control', 'pragma', 'upgrade-insecure-requests', 'user-agent', 'content-type', 'referer', 'origin', 'te', 'priority', 'dnt'];\nconst uniq = (a) => Array.from(new Set(a.filter(Boolean)));\nconst iso = (t) => { const d = new Date(String(t || '').replace(/([+-][0-9]{2})([0-9]{2})$/, '$1:$2')); return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString(); };\nconst validIp = (ip) => ip.split('.').every((o) => Number(o) >= 0 && Number(o) <= 255);\nconst decodeB64 = (b) => {\n  try {\n    const s = Buffer.from(b, 'base64').toString('utf8');\n    const printable = s.replace(/[^ -~]/g, '').length / Math.max(1, s.length);\n    return printable > 0.9 && s.length > 8 ? s.slice(0, 1500) : null;\n  } catch (e) { return null; }\n};\nconst groups = {};\nfor (const h of hits) {\n  const s = h._source || {};\n  const d = s.data || {};\n  const http = d.http || {};\n  const method = String(http.method || '');\n  const path = String(http.path || '').slice(0, 1000);\n  const query = String(http.query || '').slice(0, 2000);\n  const headers = [].concat(http.headers || []).filter((x) => x && x.name && SKIP_HEADERS.indexOf(String(x.name).toLowerCase()) < 0).map((x) => ({ name: String(x.name).toLowerCase(), value: String(x.value || '').slice(0, 2000) }));\n  const body = String(d.body || '').slice(0, 8000);\n  const dets = [].concat(d.detections || []).filter((x) => x && typeof x === 'object').map((x) => ({ id: x.id || '', name: x.name || '', severity: x.severity || '', location: x.location || '', evidence: String(x.evidence || '').slice(0, 500), cves: [].concat(x.cves || []) }));\n  const decoded = [].concat(d.decoded_layers || []).concat([].concat(d.artifacts || []).map((a) => ({ artifact: a })));\n  const interesting = dets.length || body.trim() || decoded.length || query;\n  if (!interesting) continue;\n  const srcIp = String(d.src_ip || d.srcip || '');\n  const text = [query, headers.map((x) => x.value).join(' '), body, JSON.stringify(decoded), dets.map((x) => x.evidence).join(' ')].join(' ');\n  let all = text;\n  try { all += ' ' + decodeURIComponent(text.replace(/[+]/g, ' ')); } catch (e) { all += ''; }\n  const b64 = uniq((all.match(/[A-Za-z0-9+/]{40,}={0,2}/g) || []).slice(0, 8).map(decodeB64));\n  all += ' ' + b64.join(' ');\n  const urls = uniq((all.match(/(?:https?|ftp|tftp|ldaps?|rmi|dns|gopher|iiop|corba):[/][/][^ \"'<>|;(){}]+/gi) || []).map((u) => u.slice(0, 300))).slice(0, 20);\n  const hosts = uniq(urls.map((u) => { try { return new URL(u).hostname; } catch (e) { return ''; } }));\n  const ips = uniq((all.match(/[0-9]{1,3}(?:[.][0-9]{1,3}){3}/g) || []).filter((ip) => validIp(ip) && ip !== srcIp && ip.indexOf('0.') !== 0)).slice(0, 20);\n  const commands = uniq((all.match(/(?:curl|wget|busybox|tftp|chmod|bash -c|sh -c|powershell|certutil|bitsadmin|nc -e|ncat|python[0-9.]* -c|perl -e|base64 -d|echo [A-Za-z0-9+/=]{20,})[^;|&\"'<>]{0,160}/gi) || []).map((c) => c.trim())).slice(0, 15);\n  const iocs = { urls: urls, hosts: hosts.filter((x) => !/^[0-9.]+$/.test(x)), ips: ips, commands: commands, base64: b64.slice(0, 5) };\n  const weight = dets.length * 2 + (urls.length ? 6 : 0) + (commands.length ? 6 : 0) + (b64.length ? 3 : 0) + (decoded.length ? 2 : 0) + (body.trim() ? 1 : 0);\n  const canonical = [method, path, '?' + query, headers.map((x) => x.name + ': ' + x.value).sort().join(' | '), body].join(' || ');\n  const ts = iso(s.timestamp);\n  const sensor = String(d.sensor_host || (s.agent || {}).name || '');\n  const g = groups[canonical];\n  if (g) {\n    g.count += 1;\n    if (ts < g.ts) g.ts = ts;\n    g.src_ips = uniq(g.src_ips.concat([srcIp])).slice(0, 200);\n    g.sensors = uniq(g.sensors.concat([sensor]));\n    if (!g.fingerprint && d.fingerprint) g.fingerprint = String(d.fingerprint);\n  } else {\n    groups[canonical] = {\n      canonical: canonical, ts: ts, count: 1, src_ips: uniq([srcIp]), sensors: uniq([sensor]),\n      method: method, path: path, query: query, headers: headers, body: body, detections: dets,\n      cves: uniq([].concat(...dets.map((x) => x.cves)).map((c) => String(c).toUpperCase())),\n      categories: uniq([].concat(d.categories || []).map(String)), decoded: decoded, static_iocs: iocs,\n      weight: weight, sample_alert_id: h._id, fingerprint: String(d.fingerprint || '')\n    };\n  }\n}\nconst rows = Object.values(groups);\nif (!rows.length) return [];\nreturn [{ json: { n: rows.length, events: hits.length, rows: JSON.stringify(rows) } }];\n"
       },
       "id": "b0ace2c8-049a-4b2b-8d55-3bfe14591da2",
       "name": "Extract Payloads",
@@ -150,7 +150,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO honeypot_payloads AS p (payload_hash, first_seen, last_seen, count, src_ips, sensors, method, path, query, headers, body, detections, cves, categories, decoded, static_iocs, weight, sample_alert_id)\nSELECT md5(r.canonical), r.ts, r.ts, r.count, COALESCE(r.src_ips, '{}'), COALESCE(r.sensors, '{}'), r.method, r.path, r.query, r.headers, r.body, r.detections, r.cves, r.categories, r.decoded, r.static_iocs, r.weight, r.sample_alert_id\nFROM jsonb_to_recordset($1::jsonb) AS r(canonical text, ts timestamptz, count int, src_ips text[], sensors text[], method text, path text, query text, headers jsonb, body text, detections jsonb, cves text[], categories text[], decoded jsonb, static_iocs jsonb, weight int, sample_alert_id text)\nON CONFLICT (payload_hash) DO UPDATE SET\n  first_seen = LEAST(p.first_seen, EXCLUDED.first_seen),\n  last_seen = GREATEST(p.last_seen, EXCLUDED.last_seen),\n  count = p.count + EXCLUDED.count,\n  src_ips = (SELECT COALESCE(array_agg(x), '{}') FROM (SELECT DISTINCT x FROM unnest(p.src_ips || EXCLUDED.src_ips) AS x LIMIT 500) s),\n  sensors = (SELECT COALESCE(array_agg(x), '{}') FROM (SELECT DISTINCT x FROM unnest(p.sensors || EXCLUDED.sensors) AS x) s)\nRETURNING payload_hash;",
+        "query": "INSERT INTO honeypot_payloads AS p (payload_hash, first_seen, last_seen, count, src_ips, sensors, method, path, query, headers, body, detections, cves, categories, decoded, static_iocs, weight, sample_alert_id, fingerprint)\nSELECT md5(r.canonical), r.ts, r.ts, r.count, COALESCE(r.src_ips, '{}'), COALESCE(r.sensors, '{}'), r.method, r.path, r.query, r.headers, r.body, r.detections, r.cves, r.categories, r.decoded, r.static_iocs, r.weight, r.sample_alert_id, NULLIF(r.fingerprint, '')\nFROM jsonb_to_recordset($1::jsonb) AS r(canonical text, ts timestamptz, count int, src_ips text[], sensors text[], method text, path text, query text, headers jsonb, body text, detections jsonb, cves text[], categories text[], decoded jsonb, static_iocs jsonb, weight int, sample_alert_id text, fingerprint text)\nON CONFLICT (payload_hash) DO UPDATE SET\n  first_seen = LEAST(p.first_seen, EXCLUDED.first_seen),\n  last_seen = GREATEST(p.last_seen, EXCLUDED.last_seen),\n  count = p.count + EXCLUDED.count,\n  fingerprint = COALESCE(p.fingerprint, EXCLUDED.fingerprint),\n  src_ips = (SELECT COALESCE(array_agg(x), '{}') FROM (SELECT DISTINCT x FROM unnest(p.src_ips || EXCLUDED.src_ips) AS x LIMIT 500) s),\n  sensors = (SELECT COALESCE(array_agg(x), '{}') FROM (SELECT DISTINCT x FROM unnest(p.sensors || EXCLUDED.sensors) AS x) s)\nRETURNING payload_hash;",
         "options": {
           "queryReplacement": "={{ [$json.rows || '[]'] }}"
         }
@@ -174,7 +174,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "SELECT payload_hash, sig_hash, ioc_keys, first_seen, last_seen, count, src_ips[1:5] AS src_ips, cardinality(src_ips) AS src_ip_count, sensors, method, path, query, headers, left(body, 4000) AS body, detections, cves, categories, decoded, static_iocs, weight, sample_alert_id\nFROM honeypot_payloads WHERE analysed_at IS NULL ORDER BY weight DESC, last_seen DESC LIMIT 8;",
+        "query": "SELECT payload_hash, sig_hash, ioc_keys, first_seen, last_seen, count, src_ips[1:5] AS src_ips, cardinality(src_ips) AS src_ip_count, sensors, method, path, query, headers, left(body, 4000) AS body, detections, cves, categories, decoded, static_iocs, weight, sample_alert_id, fingerprint\nFROM honeypot_payloads WHERE analysed_at IS NULL ORDER BY weight DESC, last_seen DESC LIMIT 8;",
         "options": {}
       },
       "id": "d5ab46fe-21f9-49b4-9a83-1c0b76563054",
@@ -230,7 +230,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const src = $('Build Prompt').all().map((i) => i.json);\nconst res = $input.all().map((i) => i.json);\nconst BENIGN = /(^|[.])(w3[.]org|xmlsoap[.]org|microsoft[.]com|apache[.]org|oasis-open[.]org|xml[.]org|openxmlformats[.]org|purl[.]org|android[.]com|example[.](com|org|net))$/i;\nconst realUrl = (u) => { try { return !BENIGN.test(new URL(u).hostname); } catch (e) { return true; } };\nconst out = [];\nsrc.forEach((p, n) => {\n  let a = null;\n  try { a = JSON.parse((res[n] && res[n].message && res[n].message.content) || ''); } catch (e) { a = null; }\n  if (!a || typeof a !== 'object') return;\n  const interest = Math.max(0, Math.min(100, Math.round(Number(a.interest) || 0)));\n  const s = p.static_iocs || {};\n  const stage = String(a.stage || 'unknown').toLowerCase();\n  const callback = (s.urls || []).filter(realUrl).length > 0 || (s.commands || []).length > 0;\n  const fresh = Date.now() - new Date(p.last_seen || 0).getTime() < 6 * 3600000;\n  const notify = fresh && (interest >= 60 || callback || ['dropper', 'c2', 'persistence'].indexOf(stage) >= 0);\n  const analysis = {\n    summary: String(a.summary || '').slice(0, 400), technique: String(a.technique || '').slice(0, 120), target: String(a.target || '').slice(0, 160),\n    cves: [].concat(a.cves || []).map(String).slice(0, 10), stage: stage, malware_family: String(a.malware_family || '').slice(0, 80),\n    decoded: String(a.decoded || '').slice(0, 800), iocs: a.iocs || {}, why: String(a.why || '').slice(0, 300), detection_idea: String(a.detection_idea || '').slice(0, 300),\n    model: 'OLLAMA_MODEL'\n  };\n  out.push({ json: Object.assign({}, p, { analysis: analysis, interest: interest, notify: notify }) });\n});\nreturn out;"
+        "jsCode": "const src = $('Build Prompt').all().map((i) => i.json);\nconst res = $input.all().map((i) => i.json);\nconst BENIGN = /(^|[.])(w3[.]org|xmlsoap[.]org|microsoft[.]com|apache[.]org|oasis-open[.]org|xml[.]org|openxmlformats[.]org|purl[.]org|android[.]com|example[.](com|org|net))$/i;\nconst realUrl = (u) => { try { return !BENIGN.test(new URL(u).hostname); } catch (e) { return true; } };\n// Pure path traversal: every detection is TRAV/RECON/PROTO (TRAV-004 excepted) and it is\n// traversal by detection or by the model's own technique label. Traversal riding another attack is kept.\nconst TRAV_ONLY = /^(TRAV|RECON|PROTO)-/;\nconst out = [];\nsrc.forEach((p, n) => {\n  let a = null;\n  try { a = JSON.parse((res[n] && res[n].message && res[n].message.content) || ''); } catch (e) { a = null; }\n  if (!a || typeof a !== 'object') return;\n  const interest = Math.max(0, Math.min(100, Math.round(Number(a.interest) || 0)));\n  const s = p.static_iocs || {};\n  const stage = String(a.stage || 'unknown').toLowerCase();\n  const callback = (s.urls || []).filter(realUrl).length > 0 || (s.commands || []).length > 0;\n  const PHP = /auto_prepend_file|allow_url_include|php:[/][/]|<[?]php|[.]php([?/ ]|$)|php-cgi|phpunit|eval-stdin|thinkphp|xmlrpc|wp-(admin|login|content|includes)|[^a-z]php[^a-z]/i;\n  const isPhp = PHP.test([p.path, p.query, String(p.body || '').slice(0, 4000), a.technique, a.target, a.summary].join(' '));\n  const detIds = [].concat(p.detections || []).map((x) => String((x && x.id) || '').toUpperCase()).filter(Boolean);\n  const travOnly = detIds.every((id) => TRAV_ONLY.test(id) && id !== 'TRAV-004');\n  const isTrav = travOnly && (detIds.some((id) => id.indexOf('TRAV-') === 0) || /traversal|local file inclusion|(^|[^a-z])lfi([^a-z]|$)/i.test(String(a.technique || '')));\n  const fresh = Date.now() - new Date(p.last_seen || 0).getTime() < 6 * 3600000;\n  const notify = !isPhp && !isTrav && fresh && (interest >= 60 || callback || ['dropper', 'c2', 'persistence'].indexOf(stage) >= 0);\n  const analysis = {\n    summary: String(a.summary || '').slice(0, 400), technique: String(a.technique || '').slice(0, 120), target: String(a.target || '').slice(0, 160),\n    cves: [].concat(a.cves || []).map(String).slice(0, 10), stage: stage, malware_family: String(a.malware_family || '').slice(0, 80),\n    decoded: String(a.decoded || '').slice(0, 800), iocs: a.iocs || {}, why: String(a.why || '').slice(0, 300), detection_idea: String(a.detection_idea || '').slice(0, 300),\n    model: 'OLLAMA_MODEL'\n  };\n  if (isPhp) analysis.skipped = 'php';\n  else if (isTrav) analysis.skipped = 'traversal';\n  out.push({ json: Object.assign({}, p, { analysis: analysis, interest: (isPhp || isTrav) ? Math.min(interest, 10) : interest, notify: notify }) });\n});\nreturn out;"
       },
       "id": "1bac1e09-5476-4789-8b73-ab92bdd68b1e",
       "name": "Parse Analysis",
@@ -488,7 +488,7 @@
       "parameters": {
         "operation": "executeQuery",
         "options": {},
-        "query": "DELETE FROM honeypot_signatures g WHERE NOT EXISTS (SELECT 1 FROM honeypot_payloads p WHERE p.sig_hash = g.sig_hash);\nINSERT INTO honeypot_signatures AS g (sig_hash, sig_text, first_seen, last_seen, payload_count, event_count, sample_payload_hash)\nSELECT p.sig_hash, min(p.sig_text), min(p.first_seen), max(p.last_seen), count(*), sum(p.count), (array_agg(p.payload_hash ORDER BY p.weight DESC NULLS LAST, p.first_seen))[1]\nFROM honeypot_payloads p\nWHERE p.sig_hash IN (SELECT DISTINCT x.sig_hash FROM honeypot_payloads x WHERE x.sig_hash IS NOT NULL AND (x.last_seen > now() - interval '2 days' OR NOT EXISTS (SELECT 1 FROM honeypot_signatures y WHERE y.sig_hash = x.sig_hash)))\nGROUP BY p.sig_hash\nON CONFLICT (sig_hash) DO UPDATE SET first_seen = EXCLUDED.first_seen, last_seen = EXCLUDED.last_seen, payload_count = EXCLUDED.payload_count, event_count = EXCLUDED.event_count, sample_payload_hash = EXCLUDED.sample_payload_hash;\nUPDATE honeypot_signatures g SET alert_count = x.n, first_alerted = x.f, last_alerted = x.l, technique = COALESCE(g.technique, x.t)\nFROM (SELECT sig_hash, count(*) AS n, min(analysed_at) AS f, max(analysed_at) AS l, max(analysis->>'technique') AS t FROM honeypot_payloads WHERE notified AND sig_hash IS NOT NULL GROUP BY sig_hash) x\nWHERE g.sig_hash = x.sig_hash AND g.alert_count = 0;\nINSERT INTO honeypot_iocs (ioc, first_seen, last_seen, payload_count, first_payload, alerted_at)\nSELECT k, min(p.first_seen), max(p.last_seen), count(*), min(p.payload_hash), max(CASE WHEN p.notified THEN p.analysed_at END)\nFROM honeypot_payloads p, unnest(p.ioc_keys) AS k\nWHERE p.analysed_at IS NOT NULL AND p.analysis->>'skipped' IS NULL\nGROUP BY k\nON CONFLICT (ioc) DO NOTHING;\nUPDATE honeypot_payloads p SET analysis = s.analysis || jsonb_build_object('inherited_from', s.payload_hash, 'sig_hash', p.sig_hash), interest = s.interest, analysed_at = now()\nFROM honeypot_signatures g, honeypot_payloads s\nWHERE p.analysed_at IS NULL AND p.sig_hash IS NOT NULL AND g.sig_hash = p.sig_hash\n  AND s.payload_hash = (SELECT x.payload_hash FROM honeypot_payloads x WHERE x.sig_hash = p.sig_hash AND x.analysed_at IS NOT NULL AND x.analysis->>'inherited_from' IS NULL AND x.analysis->>'skipped' IS NULL ORDER BY x.interest DESC NULLS LAST LIMIT 1)\n  AND (g.alert_count > 0 OR COALESCE(s.interest, 0) < 40)\n  AND NOT EXISTS (SELECT 1 FROM unnest(p.ioc_keys) AS k WHERE NOT EXISTS (SELECT 1 FROM honeypot_iocs i WHERE i.ioc = k));\nSELECT (SELECT count(*) FROM honeypot_signatures) AS signatures, (SELECT count(*) FROM honeypot_payloads WHERE analysed_at IS NULL) AS pending, (SELECT count(*) FROM honeypot_payloads WHERE analysis->>'inherited_from' IS NOT NULL) AS inherited;"
+        "query": "DELETE FROM honeypot_signatures g WHERE NOT EXISTS (SELECT 1 FROM honeypot_payloads p WHERE p.sig_hash = g.sig_hash);\nINSERT INTO honeypot_signatures AS g (sig_hash, sig_text, first_seen, last_seen, payload_count, event_count, sample_payload_hash)\nSELECT p.sig_hash, min(p.sig_text), min(p.first_seen), max(p.last_seen), count(*), sum(p.count), (array_agg(p.payload_hash ORDER BY p.weight DESC NULLS LAST, p.first_seen))[1]\nFROM honeypot_payloads p\nWHERE p.sig_hash IN (SELECT DISTINCT x.sig_hash FROM honeypot_payloads x WHERE x.sig_hash IS NOT NULL AND (x.last_seen > now() - interval '2 days' OR NOT EXISTS (SELECT 1 FROM honeypot_signatures y WHERE y.sig_hash = x.sig_hash)))\nGROUP BY p.sig_hash\nON CONFLICT (sig_hash) DO UPDATE SET first_seen = EXCLUDED.first_seen, last_seen = EXCLUDED.last_seen, payload_count = EXCLUDED.payload_count, event_count = EXCLUDED.event_count, sample_payload_hash = EXCLUDED.sample_payload_hash;\nUPDATE honeypot_signatures g SET alert_count = x.n, first_alerted = x.f, last_alerted = x.l, technique = COALESCE(g.technique, x.t)\nFROM (SELECT sig_hash, count(*) AS n, min(analysed_at) AS f, max(analysed_at) AS l, max(analysis->>'technique') AS t FROM honeypot_payloads WHERE notified AND sig_hash IS NOT NULL GROUP BY sig_hash) x\nWHERE g.sig_hash = x.sig_hash AND g.alert_count = 0;\nINSERT INTO honeypot_iocs (ioc, first_seen, last_seen, payload_count, first_payload, alerted_at)\nSELECT k, min(p.first_seen), max(p.last_seen), count(*), min(p.payload_hash), max(CASE WHEN p.notified THEN p.analysed_at END)\nFROM honeypot_payloads p, unnest(p.ioc_keys) AS k\nWHERE p.analysed_at IS NOT NULL AND p.analysis->>'skipped' IS NULL\nGROUP BY k\nON CONFLICT (ioc) DO NOTHING;\nUPDATE honeypot_payloads p SET analysis = s.analysis || jsonb_build_object('inherited_from', s.payload_hash, 'sig_hash', p.sig_hash), interest = s.interest, analysed_at = now()\nFROM honeypot_signatures g, honeypot_payloads s\nWHERE p.analysed_at IS NULL AND p.sig_hash IS NOT NULL AND g.sig_hash = p.sig_hash\n  AND s.payload_hash = (SELECT x.payload_hash FROM honeypot_payloads x WHERE x.sig_hash = p.sig_hash AND x.analysed_at IS NOT NULL AND x.analysis->>'inherited_from' IS NULL AND x.analysis->>'skipped' IS NULL ORDER BY x.interest DESC NULLS LAST LIMIT 1)\n  AND (g.alert_count > 0 OR COALESCE(s.interest, 0) < 40)\n  AND NOT EXISTS (SELECT 1 FROM unnest(p.ioc_keys) AS k WHERE NOT EXISTS (SELECT 1 FROM honeypot_iocs i WHERE i.ioc = k));\nUPDATE honeypot_payloads p SET analysis = s.analysis || jsonb_build_object('inherited_from', s.payload_hash, 'inherited_via', 'fingerprint', 'sig_hash', p.sig_hash), interest = s.interest, analysed_at = now()\nFROM honeypot_payloads s\nWHERE p.analysed_at IS NULL AND p.sig_hash IS NOT NULL AND p.fingerprint IS NOT NULL\n  AND COALESCE(p.body, '') = '' AND COALESCE(p.query, '') = ''\n  AND s.payload_hash = (SELECT x.payload_hash FROM honeypot_payloads x WHERE x.fingerprint = p.fingerprint AND x.notified AND x.analysed_at > now() - interval '30 days' ORDER BY x.analysed_at DESC LIMIT 1)\n  AND NOT EXISTS (SELECT 1 FROM unnest(p.ioc_keys) AS k WHERE NOT EXISTS (SELECT 1 FROM honeypot_iocs i WHERE i.ioc = k AND i.alerted_at IS NOT NULL));\nSELECT (SELECT count(*) FROM honeypot_signatures) AS signatures, (SELECT count(*) FROM honeypot_payloads WHERE analysed_at IS NULL) AS pending, (SELECT count(*) FROM honeypot_payloads WHERE analysis->>'inherited_from' IS NOT NULL) AS inherited, (SELECT count(*) FROM honeypot_payloads WHERE analysis->>'inherited_via' = 'fingerprint') AS fingerprint_inherited;"
       },
       "credentials": {
         "postgres": {
@@ -511,9 +511,9 @@
       "parameters": {
         "operation": "executeQuery",
         "options": {
-          "queryReplacement": "={{ [JSON.stringify({ sigs: $('Parse Analysis').all().map((i) => i.json.sig_hash).filter(Boolean), iocs: [].concat(...$('Parse Analysis').all().map((i) => i.json.ioc_keys || [])) })] }}"
+          "queryReplacement": "={{ [JSON.stringify({ sigs: $('Parse Analysis').all().map((i) => i.json.sig_hash).filter(Boolean), iocs: [].concat(...$('Parse Analysis').all().map((i) => i.json.ioc_keys || [])), fps: $('Parse Analysis').all().map((i) => i.json.fingerprint).filter(Boolean) })] }}"
         },
-        "query": "SELECT\n  (SELECT COALESCE(jsonb_object_agg(g.sig_hash, jsonb_build_object('payload_count', g.payload_count, 'event_count', g.event_count, 'first_seen', g.first_seen, 'alert_count', g.alert_count, 'last_alerted', g.last_alerted)), '{}'::jsonb)\n     FROM honeypot_signatures g WHERE g.sig_hash IN (SELECT jsonb_array_elements_text($1::jsonb->'sigs'))) AS sigs,\n  (SELECT COALESCE(jsonb_object_agg(i.ioc, jsonb_build_object('alerted_at', i.alerted_at, 'payload_count', i.payload_count)), '{}'::jsonb)\n     FROM honeypot_iocs i WHERE i.ioc IN (SELECT jsonb_array_elements_text($1::jsonb->'iocs'))) AS iocs;"
+        "query": "SELECT\n  (SELECT COALESCE(jsonb_object_agg(g.sig_hash, jsonb_build_object('payload_count', g.payload_count, 'event_count', g.event_count, 'first_seen', g.first_seen, 'alert_count', g.alert_count, 'last_alerted', g.last_alerted)), '{}'::jsonb)\n     FROM honeypot_signatures g WHERE g.sig_hash IN (SELECT jsonb_array_elements_text($1::jsonb->'sigs'))) AS sigs,\n  (SELECT COALESCE(jsonb_object_agg(i.ioc, jsonb_build_object('alerted_at', i.alerted_at, 'payload_count', i.payload_count)), '{}'::jsonb)\n     FROM honeypot_iocs i WHERE i.ioc IN (SELECT jsonb_array_elements_text($1::jsonb->'iocs'))) AS iocs,\n  (SELECT COALESCE(jsonb_object_agg(f.fingerprint, jsonb_build_object('last_alerted', f.l, 'alert_count', f.n)), '{}'::jsonb)\n     FROM (SELECT fingerprint, max(analysed_at) AS l, count(*) AS n FROM honeypot_payloads WHERE notified AND fingerprint IN (SELECT jsonb_array_elements_text($1::jsonb->'fps')) GROUP BY fingerprint) f) AS fps;"
       },
       "credentials": {
         "postgres": {
@@ -533,8 +533,54 @@
         208
       ],
       "parameters": {
-        "jsCode": "const REALERT_DAYS = 30;\nconst items = $('Parse Analysis').all().map((i) => i.json);\nconst look = $input.first().json || {};\nconst sigs = look.sigs || {};\nconst iocs = look.iocs || {};\nconst now = Date.now();\nconst alertedSigs = {};\nconst alertedIocs = {};\nconst order = items.map((p, n) => n).sort((a, b) => (items[b].interest || 0) - (items[a].interest || 0));\nfor (const n of order) {\n  const p = items[n];\n  const g = sigs[p.sig_hash] || null;\n  const keys = [].concat(p.ioc_keys || []);\n  const newIocs = keys.filter((k) => !(iocs[k] && iocs[k].alerted_at) && !alertedIocs[k]);\n  const lastAlerted = g && g.last_alerted ? new Date(g.last_alerted).getTime() : 0;\n  const recent = lastAlerted > 0 && now - lastAlerted < REALERT_DAYS * 86400000;\n  const seen = { sig_hash: p.sig_hash || null, variants: g ? Number(g.payload_count) || 0 : 0, events: g ? Number(g.event_count) || 0 : 0, sig_first_seen: g ? g.first_seen : null, alert_count: g ? Number(g.alert_count) || 0 : 0, last_alerted: g ? g.last_alerted : null, new_iocs: newIocs.slice(0, 20) };\n  let notify = p.notify === true;\n  if (notify && !newIocs.length) {\n    if (recent) { notify = false; seen.suppressed = 'signature already alerted ' + new Date(lastAlerted).toISOString().slice(0, 16); }\n    else if (p.sig_hash && alertedSigs[p.sig_hash]) { notify = false; seen.suppressed = 'same signature as ' + alertedSigs[p.sig_hash] + ' in this batch'; }\n  }\n  if (notify) {\n    if (p.sig_hash) alertedSigs[p.sig_hash] = p.payload_hash;\n    keys.forEach((k) => { alertedIocs[k] = true; });\n    seen.reason = !lastAlerted ? 'new signature' : newIocs.length ? 'known signature, new indicators' : 'resurfaced after ' + REALERT_DAYS + 'd';\n  }\n  items[n] = Object.assign({}, p, { notify: notify, seen: seen, analysis: Object.assign({}, p.analysis || {}, { seen: seen }) });\n}\nreturn items.map((p) => ({ json: p }));",
+        "jsCode": "const REALERT_DAYS = 30;\nconst items = $('Parse Analysis').all().map((i) => i.json);\nconst look = $input.first().json || {};\nconst sigs = look.sigs || {};\nconst iocs = look.iocs || {};\nconst fps = look.fps || {};\nconst now = Date.now();\nconst alertedSigs = {};\nconst alertedIocs = {};\nconst alertedFps = {};\nconst order = items.map((p, n) => n).sort((a, b) => (items[b].interest || 0) - (items[a].interest || 0));\nfor (const n of order) {\n  const p = items[n];\n  const g = sigs[p.sig_hash] || null;\n  const keys = [].concat(p.ioc_keys || []);\n  const newIocs = keys.filter((k) => !(iocs[k] && iocs[k].alerted_at) && !alertedIocs[k]);\n  const lastAlerted = g && g.last_alerted ? new Date(g.last_alerted).getTime() : 0;\n  const recent = lastAlerted > 0 && now - lastAlerted < REALERT_DAYS * 86400000;\n  // Same client fingerprint sweeping a wordlist: every path is a new signature, so suppress bodyless, queryless probes per fingerprint.\n  const fp = String(p.fingerprint || '');\n  const probe = !String(p.body || '').trim() && !String(p.query || '').trim();\n  const fpLast = fp && fps[fp] && fps[fp].last_alerted ? new Date(fps[fp].last_alerted).getTime() : 0;\n  const fpRecent = probe && fpLast > 0 && now - fpLast < REALERT_DAYS * 86400000;\n  const seen = { sig_hash: p.sig_hash || null, variants: g ? Number(g.payload_count) || 0 : 0, events: g ? Number(g.event_count) || 0 : 0, sig_first_seen: g ? g.first_seen : null, alert_count: g ? Number(g.alert_count) || 0 : 0, last_alerted: g ? g.last_alerted : null, new_iocs: newIocs.slice(0, 20), fingerprint: fp || null };\n  let notify = p.notify === true;\n  if (notify && !newIocs.length) {\n    if (recent) { notify = false; seen.suppressed = 'signature already alerted ' + new Date(lastAlerted).toISOString().slice(0, 16); }\n    else if (p.sig_hash && alertedSigs[p.sig_hash]) { notify = false; seen.suppressed = 'same signature as ' + alertedSigs[p.sig_hash] + ' in this batch'; }\n    else if (fpRecent) { notify = false; seen.suppressed = 'client fingerprint ' + fp + ' already alerted ' + new Date(fpLast).toISOString().slice(0, 16); }\n    else if (probe && fp && alertedFps[fp]) { notify = false; seen.suppressed = 'same client fingerprint as ' + alertedFps[fp] + ' in this batch'; }\n  }\n  if (notify) {\n    if (p.sig_hash) alertedSigs[p.sig_hash] = p.payload_hash;\n    if (fp && probe) alertedFps[fp] = p.payload_hash;\n    keys.forEach((k) => { alertedIocs[k] = true; });\n    seen.reason = !lastAlerted ? 'new signature' : newIocs.length ? 'known signature, new indicators' : 'resurfaced after ' + REALERT_DAYS + 'd';\n  }\n  items[n] = Object.assign({}, p, { notify: notify, seen: seen, analysis: Object.assign({}, p.analysis || {}, { seen: seen }) });\n}\nreturn items.map((p) => ({ json: p }));",
         "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "e658ca9e-0281-4cee-ad08-075bf1a6b9cf",
+      "name": "Skip PHP",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1552,
+        208
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "options": {},
+        "query": "UPDATE honeypot_payloads SET analysed_at = now(), interest = 0, analysis = '{\"skipped\": \"php\", \"summary\": \"PHP payload, not analysed\"}'::jsonb\nWHERE analysed_at IS NULL AND (coalesce(path, '') || ' ' || coalesce(query, '') || ' ' || coalesce(left(body, 8000), '')) ~* 'auto_prepend_file|allow_url_include|php://|<[?]php|[.]php([?/ ]|$)|php-cgi|phpunit|eval-stdin|thinkphp|xmlrpc|wp-(admin|login|content|includes)';"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "id": "c969f1a0-f737-4416-905f-09a8adb3ac9a",
+      "name": "Skip Traversal",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1664,
+        400
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "options": {},
+        "query": "UPDATE honeypot_payloads SET analysed_at = now(), interest = 0, analysis = '{\"skipped\": \"traversal\", \"summary\": \"Path traversal payload, not analysed\"}'::jsonb\nWHERE analysed_at IS NULL\n  AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(detections, '[]'::jsonb)) d WHERE d->>'id' LIKE 'TRAV-%')\n  AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(detections, '[]'::jsonb)) d WHERE COALESCE(d->>'id', '') !~ '^(TRAV|RECON|PROTO)-' OR d->>'id' = 'TRAV-004');"
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
       }
     }
   ],
@@ -702,7 +748,7 @@
       "main": [
         [
           {
-            "node": "Unsigned Payloads",
+            "node": "Skip PHP",
             "type": "main",
             "index": 0
           }
@@ -790,13 +836,36 @@
           }
         ]
       ]
+    },
+    "Skip PHP": {
+      "main": [
+        [
+          {
+            "node": "Skip Traversal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Traversal": {
+      "main": [
+        [
+          {
+            "node": "Unsigned Payloads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
     "executionOrder": "v1",
     "availableInMCP": true,
     "errorWorkflow": "oTbFYlbhb8Dlg0CM",
-    "binaryMode": "separate"
+    "binaryMode": "separate",
+    "timezone": "Europe/London"
   },
   "meta": {
     "aiBuilderAssisted": true,
@@ -806,70 +875,70 @@
     {
       "id": "3039fb2e-b875-4fdb-a96d-2972696ea741",
       "name": "Extract and dedupe",
-      "nodeIds": [
-        "b0ace2c8-049a-4b2b-8d55-3bfe14591da2",
-        "f58fa825-a74d-41e4-9573-3cd1212bb345",
-        "e658ca9e-0281-4cee-ad08-075bf1a6b9cf",
-        "c969f1a0-f737-4416-905f-09a8adb3ac9a"
+      "nodeNames": [
+        "Extract Payloads",
+        "Upsert Payloads",
+        "Skip PHP",
+        "Skip Traversal"
       ],
       "description": "Group events by canonical payload, static IOC extraction, md5-keyed upsert into honeypot_payloads, PHP and pure path-traversal payloads skipped."
     },
     {
       "id": "3a37d6e7-7b0e-48ff-9106-52480c9d9caf",
       "name": "Signatures",
-      "nodeIds": [
-        "04e66eb1-cc24-4b96-8216-99c808a32fef",
-        "cc3ca146-9b70-47ee-ba1b-7f1a1458f320",
-        "99519ea4-a9d8-4b41-b21b-e779945c12af",
-        "a1798b02-9bbd-405e-ab30-eab9a8d7e86a"
+      "nodeNames": [
+        "Unsigned Payloads",
+        "Compute Signatures",
+        "Save Signatures",
+        "Refresh Signatures"
       ],
-      "description": "Shape signature per payload (nonces, JWTs, IPs, OAST hosts stripped). Known signatures without new IOCs inherit analysis, no LLM."
+      "description": "Shape signature per payload. Known signatures, or bodyless probes from an already-alerted client fingerprint, inherit analysis; no LLM."
     },
     {
       "id": "e8b3dc00-c52b-4daa-8aa0-480f61b9d8c1",
       "name": "LLM analysis",
-      "nodeIds": [
-        "d5ab46fe-21f9-49b4-9a83-1c0b76563054",
-        "ff0ebaad-13ee-4c96-91e4-3af98d9a742d",
-        "9186cb36-087b-44b8-94ed-678ce94845be",
-        "1bac1e09-5476-4789-8b73-ab92bdd68b1e"
+      "nodeNames": [
+        "Get Unanalysed",
+        "Build Prompt",
+        "LLM Analyse",
+        "Parse Analysis"
       ],
       "description": "Up to 8 unanalysed payloads per run, heaviest first."
     },
     {
       "id": "d403970b-4b76-45ca-a098-4a353b7b935b",
       "name": "Seen before?",
-      "nodeIds": [
-        "54ad0aef-a5de-4fa2-bec7-758da4c425d6",
-        "5125f1dc-5e62-4f38-af6c-8fa42ea9c0cd"
+      "nodeNames": [
+        "Seen Lookup",
+        "Apply Seen"
       ],
-      "description": "Suppress if signature alerted in last 30d unless it carries a never-alerted IOC; one alert per signature per batch."
+      "description": "Suppress if signature (or fingerprint, for bodyless probes) alerted in 30d unless it has a new IOC; one alert per sig/fingerprint per batch."
     },
     {
       "id": "0062a67d-32f3-4489-937c-49c1bbd0056a",
       "name": "Alert",
-      "nodeIds": [
-        "db1c2c60-768f-4d3d-9fa1-038df35b9c76",
-        "da42b96c-e800-4d17-9082-b625e29871dc",
-        "29468e51-b015-48e5-b10f-eba8b90af33a"
+      "nodeNames": [
+        "Worth Alerting?",
+        "Payload Embeds",
+        "Post Payload"
       ],
       "description": "Posts to #honeypot-payloads."
     },
     {
       "id": "ab442e01-9e96-4aea-aed8-3846d3d2189a",
       "name": "Persist analysis",
-      "nodeIds": [
-        "0d4dde9e-a69d-48a8-8958-fe406a0a209f",
-        "5199cfc5-caeb-47d5-9697-c5470a33695c"
+      "nodeNames": [
+        "Analysis Rows",
+        "Save Analysis"
       ],
       "description": "Analysis, notified flag, signature alert stats and IOC ledger."
     },
     {
       "id": "2ad03b5e-0362-453e-be1e-e6c580229100",
       "name": "Advance cursor",
-      "nodeIds": [
-        "e3f9ed56-2b5a-4350-a162-5a1c7cc07b97",
-        "4a252da8-16ec-466e-9599-84ab9d40ca15"
+      "nodeNames": [
+        "Next Cursor",
+        "Save HP Cursor"
       ],
       "description": "Runs last."
     }

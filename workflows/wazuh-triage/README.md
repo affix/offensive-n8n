@@ -34,9 +34,13 @@ Each payload is also given a **signature**, a normalised shape of the request wi
 
 Up to 8 unanalysed payloads per run, heaviest first, go to the LLM, which returns technique, target, CVEs, stage, malware family, a deobfuscated core, IOCs, an interest score from 0 to 100 and a detection idea. A payload alerts when it was seen in the last 6 hours and either scores 60 or more, carries a real callback URL or command, or is classified as a dropper, C2 or persistence stage. Alerts are then suppressed if the signature was already alerted in the last 30 days and nothing in it is new, so we only hear about a known exploit again when it starts pointing at fresh infrastructure.
 
+Signatures keep the request path, which is what we want for exploits but is useless against a wordlist sweep, where one client walks a couple of thousand paths with identical headers and every path looks like a new signature. To catch that we also store the honeypot's own client `fingerprint` on each payload. A probe with no body and no query string is suppressed when its fingerprint already alerted in the last 30 days (or earlier in the same batch), and pending probes from that fingerprint inherit the alerted analysis without an LLM call. Probes that carry a body or query, or a never-alerted indicator, are still judged on their own, so the same tool switching from recon to an actual exploit still gets through.
+
+PHP payloads and pure path traversal (every detection is `TRAV-`, `RECON-` or `PROTO-`) are marked as skipped before analysis, since neither is relevant to the emulated application and together they made up most of the volume.
+
 The Postgres tables are created by the workflow itself on every run (`CREATE TABLE IF NOT EXISTS`), so there is nothing to set up beyond the database.
 
-The workflow expects honeypot events in Wazuh with this shape under `data`: `http.method`, `http.path`, `http.query`, `http.headers` (a list of `{name, value}`), `body`, `src_ip`, `sensor_host`, `detections` (a list of `{id, name, severity, location, evidence, cves}`), `decoded_layers`, `artifacts` and `categories`. Any honeypot that logs JSON in that shape and is decoded into the `honeypot` rule group will work.
+The workflow expects honeypot events in Wazuh with this shape under `data`: `http.method`, `http.path`, `http.query`, `http.headers` (a list of `{name, value}`), `body`, `src_ip`, `sensor_host`, `fingerprint` (optional, a stable client fingerprint), `detections` (a list of `{id, name, severity, location, evidence, cves}`), `decoded_layers`, `artifacts` and `categories`. Any honeypot that logs JSON in that shape and is decoded into the `honeypot` rule group will work.
 
 ### Rewind To Last N
 
