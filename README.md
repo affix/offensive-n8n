@@ -12,6 +12,11 @@ Ansible project that turns a Kali Linux machine, arm64 or amd64, into a LAN-only
 | `docker` | Docker CE from Docker's apt repo (not `docker.io`), buildx and compose plugins |
 | `n8n` | Node.js from NodeSource, n8n pinned via npm, Python task runner, `n8n` system user, systemd unit, env file, scoped sudoers, Caddy reverse proxy |
 | `tooling` | Kali tool packages, qemu binfmt handlers for amd64 emulation on arm64 hosts, nuclei templates |
+| `postgres` | Optional PostgreSQL container for workflow data |
+| `autossh` | Optional persistent SSH tunnel |
+| `ghidra` | Optional headless Ghidra pinned by checksum on JDK 21, natives built on arm64, decompiler smoke test as the service user |
+| `patchdiff` | Optional patch diff pipeline: `pd` stage scripts in a pinned uv project with ghidriff, pyghidra, jadx, a sandboxed unblob image and an ilspycmd image |
+| `pd_worker` | Worker image only (see [`pd-worker`](pd-worker/README.md)): service user and uv, without n8n |
 
 ## Requirements
 
@@ -75,6 +80,22 @@ All tunables live in `group_vars/all.yaml`. Defaults and comments are in `group_
 | `autossh_user`, `autossh_identity_file` | Local account the tunnel runs as and the key it uses. The key must already exist on the host. |
 | `autossh_remote`, `autossh_remote_port` | SSH destination (`user@host`) and port. |
 | `autossh_local_forwards` | `ssh -L` specs held open by the tunnel. |
+| `ghidra_enabled` | Gate for the `ghidra` role. Off by default. |
+| `ghidra_version`, `ghidra_release_date`, `ghidra_sha256` | Pinned Ghidra release and its checksum from the release notes. |
+| `ghidra_gradle_sha256` | Checksum of the Gradle distribution the wrapper downloads when building natives on arm64. |
+| `ghidra_base_dir`, `ghidra_install_dir` | Versions unpack side by side under the base dir; the install dir is the `current` symlink and becomes `GHIDRA_INSTALL_DIR`. |
+| `ghidra_jdk_package`, `ghidra_java_home` | JDK Ghidra is pinned to via `JAVA_HOME_OVERRIDE`, independent of the distro default JDK. |
+| `ghidra_maxmem` | Java heap for headless analysis and ghidriff. Defaults to RAM minus 3GB, at least 2GB. |
+| `ghidra_keep_previous` | Keep the previous Ghidra after an upgrade. Cached projects are upgraded on open and cannot go back, so only set false once the new version has run cleanly. |
+| `patchdiff_enabled` | Gate for the `patchdiff` role. Off by default; needs `ghidra_enabled`. |
+| `patchdiff_dir`, `patchdiff_loot_dir` | Scripts, uv project and tool config, and the job output tree under `loot_dir`. |
+| `patchdiff_python` | Interpreter for the venv. Stays on 3.13 because JPype has no 3.14 wheel. |
+| `patchdiff_ghidriff_ref`, `patchdiff_pyghidra_version`, `patchdiff_python_deps` | Pinned ghidriff commit, pyghidra and other Python dependencies. |
+| `patchdiff_jadx_version`, `patchdiff_jadx_sha256` | Pinned jadx for JAR and APK decompilation. |
+| `patchdiff_unblob_image` | Digest-pinned unblob image used as a `--network none` unpacking sandbox. |
+| `patchdiff_ilspy_version`, `patchdiff_dotnet_sdk_image` | ilspycmd release and the pinned .NET SDK image it is built on. |
+| `patchdiff_ollama_url`, `patchdiff_ollama_model` | Ollama endpoint and model for the triage stage. |
+| `patchdiff_packages` | Host unpackers kept for manual triage. |
 
 No image anywhere in the project uses the `latest` tag.
 
@@ -110,6 +131,18 @@ docker run --rm -v /opt/loot:/loot projectdiscovery/katana:v1.8.0 -u https://exa
 | [`threat-intel`](workflows/threat-intel/README.md) | IP reputation from AbuseIPDB, VirusTotal, GreyNoise and OTX, as a sub-workflow and an IP or domain report form. |
 
 The exports are sanitised. After importing, replace the placeholders (`OLLAMA_HOST`, `OLLAMA_MODEL`, `WAZUH_INDEXER`, `DISCORD_*`, `DATA_TABLE_*`, `CREDENTIAL_ID`) as described in each folder's README. Workflow IDs are kept so sub-workflow calls resolve, which also means importing into an instance that already has them overwrites the existing copies. The Wazuh workflows need the `postgres` role enabled.
+
+## Patch diffing
+
+With `ghidra_enabled` and `patchdiff_enabled` set, the host gets headless Ghidra and the `pd` wrapper, which the patch diff workflows call from Execute Command:
+
+```
+pd {fetch|unpack|diff|advisory|triage|housekeeping} --job-dir <dir> --product <name> --old <ver> --new <ver>
+```
+
+Each stage reads `<run_dir>/config.json` written by the orchestrator, writes a small `result.json` to the job dir and leaves everything else on disk under `patchdiff_loot_dir`. Archives other than plain zip, tar and deb are unpacked inside the unblob container with no network. The triage stage is advisory only and never drops a candidate.
+
+Ghidra analysis is heavy for a Pi. [`pd-worker`](pd-worker/README.md) builds a cloud image with the same stack so the stages can run on a throwaway AWS or DigitalOcean worker instead.
 
 ## Backups
 
