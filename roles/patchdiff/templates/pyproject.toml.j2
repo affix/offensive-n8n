@@ -1,0 +1,19 @@
+# Managed by Ansible. Python environment for the PD job scripts in bin/.
+[project]
+name = "patchdiff"
+version = "1.0.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "ghidriff @ git+https://github.com/clearbluejar/ghidriff@{{ patchdiff_ghidriff_ref }}",
+    "pyghidra=={{ patchdiff_pyghidra_version }}",
+{% for dep in patchdiff_python_deps %}
+    "{{ dep }}",
+{% endfor %}
+]
+
+[tool.uv]
+package = false
+
+# Use the PyGhidra wheel shipped with the pinned Ghidra so the two stay aligned.
+[tool.uv.sources]
+pyghidra = { path = "{{ ghidra_install_dir }}/Ghidra/Features/PyGhidra/pypkg/dist/pyghidra-{{ patchdiff_pyghidra_version }}-py3-none-any.whl" }

@@ -1,0 +1,215 @@
+---
+# Headless Ghidra from the pinned upstream release zip (checksum verified),
+# installed side by side under ghidra_base_dir with a `current` symlink. The
+# release only ships x86_64 natives, so on arm64 the decompiler, sleigh and
+# demangler are built in place with the bundled Gradle wrapper. The tree is
+# root-owned and read-only to the n8n service user.
+
+- name: Install the JDK and native build prerequisites
+  ansible.builtin.apt:
+    name:
+      - "{{ ghidra_jdk_package }}"
+      - build-essential
+      - unzip
+    state: present
+
+- name: Check the JDK home exists
+  ansible.builtin.stat:
+    path: "{{ ghidra_java_home }}/bin/javac"
+  register: ghidra_javac
+
+- name: Fail when the pinned JDK is not where Ghidra is told to look
+  ansible.builtin.assert:
+    that: ghidra_javac.stat.exists or ansible_check_mode
+    fail_msg: "{{ ghidra_java_home }} has no javac; set ghidra_java_home to the {{ ghidra_jdk_package }} install path."
+    quiet: true
+
+- name: Create the Ghidra base directory
+  ansible.builtin.file:
+    path: "{{ ghidra_base_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Check whether the pinned Ghidra version is already unpacked
+  ansible.builtin.stat:
+    path: "{{ ghidra_home }}/Ghidra/application.properties"
+  register: ghidra_present
+
+# Skipped entirely when the version is present, so no re-download or re-unpack.
+- name: Download and unpack Ghidra {{ ghidra_version }}
+  when: not ghidra_present.stat.exists and not ansible_check_mode
+  block:
+    - name: Download the Ghidra release zip (checksum verified)
+      ansible.builtin.get_url:
+        url: "{{ ghidra_release_url }}"
+        checksum: "sha256:{{ ghidra_sha256 }}"
+        dest: "{{ ghidra_base_dir }}/.ghidra_{{ ghidra_version }}.zip"
+        owner: root
+        group: root
+        mode: "0644"
+        timeout: 600
+
+    - name: Unpack Ghidra
+      ansible.builtin.unarchive:
+        src: "{{ ghidra_base_dir }}/.ghidra_{{ ghidra_version }}.zip"
+        dest: "{{ ghidra_base_dir }}"
+        remote_src: true
+        owner: root
+        group: root
+        creates: "{{ ghidra_home }}/Ghidra/application.properties"
+  always:
+    - name: Remove the Ghidra release zip
+      ansible.builtin.file:
+        path: "{{ ghidra_base_dir }}/.ghidra_{{ ghidra_version }}.zip"
+        state: absent
+
+# The wrapper downloads Gradle itself; pin what it fetches.
+- name: Pin the Gradle distribution the wrapper downloads
+  ansible.builtin.lineinfile:
+    path: "{{ ghidra_home }}/support/gradle/gradle-wrapper.properties"
+    regexp: "^distributionSha256Sum="
+    line: "distributionSha256Sum={{ ghidra_gradle_sha256 }}"
+  when: not ansible_check_mode or ghidra_present.stat.exists
+
+# Several JDKs can coexist on Kali (default-jdk is 25); point Ghidra at the pinned one.
+- name: Point Ghidra at the pinned JDK
+  ansible.builtin.lineinfile:
+    path: "{{ ghidra_home }}/support/launch.properties"
+    regexp: "^JAVA_HOME_OVERRIDE="
+    line: "JAVA_HOME_OVERRIDE={{ ghidra_java_home }}"
+  when: not ansible_check_mode or ghidra_present.stat.exists
+
+# Built natives land in <module>/build/os/<platform>/ and are preferred over os/<platform>/.
+- name: Build the linux_arm_64 natives (decompiler, sleigh, demangler)
+  ansible.builtin.command:
+    cmd: ./gradlew --no-daemon --quiet buildNatives
+    chdir: "{{ ghidra_home }}/support/gradle"
+    creates: "{{ ghidra_decompiler }}"
+  environment:
+    JAVA_HOME: "{{ ghidra_java_home }}"
+    GRADLE_USER_HOME: "{{ ghidra_base_dir }}/.gradle"
+  async: 5400
+  poll: 30
+  when: ghidra_build_natives | bool
+
+- name: Check the native decompiler exists
+  ansible.builtin.stat:
+    path: "{{ ghidra_decompiler }}"
+  register: ghidra_decompile_bin
+
+- name: Fail when the native decompiler is missing
+  ansible.builtin.assert:
+    that: ghidra_decompile_bin.stat.exists or ansible_check_mode
+    fail_msg: "{{ ghidra_decompiler }} is missing after buildNatives; check the Gradle output."
+    quiet: true
+
+- name: Keep the Ghidra tree root-owned and world-readable
+  ansible.builtin.file:
+    path: "{{ ghidra_home }}"
+    owner: root
+    group: root
+    mode: "u=rwX,g=rX,o=rX"
+    recurse: true
+  when: not ansible_check_mode or ghidra_present.stat.exists
+
+- name: Point the current symlink at Ghidra {{ ghidra_version }}
+  ansible.builtin.file:
+    src: "{{ ghidra_home }}"
+    dest: "{{ ghidra_install_dir }}"
+    state: link
+    force: true
+    owner: root
+    group: root
+
+- name: Export GHIDRA_INSTALL_DIR for login shells
+  ansible.builtin.template:
+    src: ghidra.sh.j2
+    dest: /etc/profile.d/ghidra.sh
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install the decompiler smoke-test script
+  ansible.builtin.copy:
+    src: PdSmokeDecompile.java
+    dest: "{{ ghidra_base_dir }}/scripts/"
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+
+# Ghidra keeps per-user settings (and compiled script bundles) under
+# $HOME/.config/ghidra/<release>; the service user's home is n8n_dir.
+- name: Create the Ghidra user settings directory for the service user
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ghidra_user }}"
+    group: "{{ n8n_group }}"
+    mode: "0750"
+  loop:
+    - "{{ n8n_dir }}/.config"
+    - "{{ n8n_dir }}/.config/ghidra"
+
+- name: Smoke-test headless analysis and decompilation as the service user
+  when: not ansible_check_mode
+  block:
+    - name: Create a scratch project directory
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: pd-ghidra-smoke-
+      become: true
+      become_user: "{{ ghidra_user }}"
+      register: ghidra_smoke_tmp
+      changed_when: false
+
+    - name: Analyse /bin/true and decompile a few functions
+      ansible.builtin.command:
+        argv:
+          - "{{ ghidra_install_dir }}/support/analyzeHeadless"
+          - "{{ ghidra_smoke_tmp.path }}"
+          - smoke
+          - -import
+          - /bin/true
+          - -scriptPath
+          - "{{ ghidra_base_dir }}/scripts"
+          - -postScript
+          - PdSmokeDecompile.java
+          - -deleteProject
+      environment:
+        HOME: "{{ n8n_dir }}"
+        GHIDRA_HEADLESS_MAXMEM: 2G
+      become: true
+      become_user: "{{ ghidra_user }}"
+      register: ghidra_smoke
+      changed_when: false
+      failed_when: ghidra_smoke.rc != 0 or 'PD_SMOKE_OK' not in ghidra_smoke.stdout
+  always:
+    - name: Remove the scratch project directory
+      ansible.builtin.file:
+        path: "{{ ghidra_smoke_tmp.path }}"
+        state: absent
+      when: ghidra_smoke_tmp.path is defined
+      changed_when: false
+
+# Projects opened by a newer Ghidra are upgraded in place and cannot be opened
+# by the older version afterwards, so the previous install is only removed when
+# ghidra_keep_previous is false.
+- name: Find previous Ghidra installs
+  ansible.builtin.find:
+    paths: "{{ ghidra_base_dir }}"
+    patterns: "ghidra_*_PUBLIC"
+    file_type: directory
+    excludes: "ghidra_{{ ghidra_version }}_PUBLIC"
+  register: ghidra_previous
+
+- name: Remove previous Ghidra installs
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ ghidra_previous.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when: not ghidra_keep_previous | bool

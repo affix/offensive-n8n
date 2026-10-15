@@ -1,0 +1,10 @@
+---
+# Derived from the tunables in group_vars; not meant to be overridden.
+ghidra_release_zip: "ghidra_{{ ghidra_version }}_PUBLIC_{{ ghidra_release_date }}.zip"
+ghidra_release_url: "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_{{ ghidra_version }}_build/{{ ghidra_release_zip }}"
+ghidra_home: "{{ ghidra_base_dir }}/ghidra_{{ ghidra_version }}_PUBLIC"
+ghidra_native_platform: "{{ {'arm64': 'linux_arm_64', 'amd64': 'linux_x86_64'}[deb_arch] }}"
+# The release zip ships linux_x86_64 natives; every other platform builds its own.
+ghidra_build_natives: "{{ deb_arch != 'amd64' }}"
+ghidra_decompiler: >-
+  {{ ghidra_home }}/Ghidra/Features/Decompiler/{{ 'build/' if ghidra_build_natives | bool else '' }}os/{{ ghidra_native_platform }}/decompile

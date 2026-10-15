@@ -198,3 +198,88 @@ postgres_settings:
   work_mem: "32MB"
   maintenance_work_mem: "256MB"
   max_connections: 50
+
+# --- Ghidra (headless, for patch diffing) -----------------------------------
+
+# Pinned upstream release. Take the SHA-256 from the release notes. The JDK
+# minimum comes from Ghidra/application.properties (application.java.min=21).
+ghidra_enabled: false
+ghidra_version: "12.1.4"
+ghidra_release_date: "20260921"
+ghidra_sha256: "ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db"
+
+# Gradle the bundled wrapper downloads to build the arm64 natives
+# (support/gradle/gradle-wrapper.properties of the pinned release).
+ghidra_gradle_sha256: "acd53f1edaf02f1a8ff99879f8a34b302661a057d9b063ae9e35b552f804d20a"
+
+# Versions install side by side here; GHIDRA_INSTALL_DIR is the symlink.
+ghidra_base_dir: "/opt/ghidra"
+ghidra_install_dir: "{{ ghidra_base_dir }}/current"
+
+# Kali's default-jdk is 25; Ghidra is pinned to this one via JAVA_HOME_OVERRIDE.
+ghidra_jdk_package: "openjdk-21-jdk-headless"
+ghidra_java_home: "/usr/lib/jvm/java-21-openjdk-{{ deb_arch }}"
+
+# Java heap for headless analysis and ghidriff: total RAM minus 3GB, floor 2GB.
+# The Pi also runs n8n and postgres (shared_buffers 1GB); Ollama is remote.
+ghidra_maxmem: "{{ [ansible_memtotal_mb - 3072, 2048] | max }}m"
+
+# Service user that runs analysis (owns ~/.config/ghidra, read-only on the install).
+ghidra_user: "{{ n8n_user }}"
+
+# Keep the previous version after an upgrade. Cached Ghidra projects (the
+# per-product ghidriff projects under the patchdiff loot dir) are upgraded on
+# open by a newer Ghidra and can no longer be opened by the old one, so only
+# set this false once the new version has run cleanly.
+ghidra_keep_previous: true
+
+# --- Patch diff pipeline ----------------------------------------------------
+
+# Job scripts, uv project and tool config. Runs under the PD n8n workflows.
+patchdiff_enabled: false
+patchdiff_dir: "/opt/patchdiff"
+patchdiff_loot_dir: "{{ loot_dir }}/patchdiff"
+
+# Interpreter for the patchdiff venv. JPype 1.5.2 (pinned by pyghidra) has no
+# Python 3.14 wheel and Kali's system Python is 3.14, so stay on 3.13.
+patchdiff_python: "/usr/bin/python3.13"
+
+# ghidriff from a pinned commit: PyPI 1.0.0 predates Ghidra 12 and has a
+# markdown crash fixed on main. pyghidra comes from the Ghidra release itself.
+patchdiff_ghidriff_ref: "4f5d895fcbb1eacd65efd81145922c15bb7e741d"
+patchdiff_pyghidra_version: "3.1.0"
+patchdiff_python_deps:
+  - "httpx==0.28.1"
+  - "packaging==26.3"
+  - "unidiff==1.0.1"
+
+# jadx (arch-neutral zip) for JAR/APK decompilation.
+patchdiff_jadx_version: "1.5.6"
+patchdiff_jadx_sha256: "545ea2be9c242511bc145755cf4bda2485ade42966e096f8b4d3da2a230e8974"
+
+# Unpacking sandbox for non-plain archives (run with --network none). The
+# image index includes linux/arm64, so no emulation.
+patchdiff_unblob_image: "ghcr.io/onekey-sec/unblob:26.6.4@sha256:0779adc4fc7751c601eaaa2eaae1ad04279a8afadecb36af4315752b72f5e2f9"
+
+# ilspycmd (.NET decompiler) built into a local image on the pinned .NET SDK.
+# ilspycmd 11.x targets net10.0 only; the SDK index includes linux/arm64.
+patchdiff_ilspy_version: "11.1.0.9782"
+patchdiff_dotnet_sdk_image: "mcr.microsoft.com/dotnet/sdk:10.0.401-noble@sha256:e70cdb7f80b0348f5cb85f19a8f670fca061f033d57eed12fa003d58b0e06317"
+
+# Ollama used by pd_triage (same endpoint and model as ASM · 07 Triage).
+patchdiff_ollama_url: "http://10.20.0.2:11434"
+patchdiff_ollama_model: "huihui_ai/qwen3.5-abliterated:9b"
+
+# Host unpackers kept for manual triage; the scripts sandbox anything that is
+# not a plain zip/tar/deb in the unblob container.
+patchdiff_packages:
+  - 7zip
+  - msitools
+  - cabextract
+  - unzip
+  - rpm2cpio
+  - cpio
+  - binutils
+  - zstd
+  - git
+  - jq

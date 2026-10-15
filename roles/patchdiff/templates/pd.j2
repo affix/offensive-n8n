@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Managed by Ansible. Entry point for the PD job scripts: pd <stage> [args...]
+set -euo pipefail
+
+stage="${1:-}"
+shift || true
+case "$stage" in
+  fetch|unpack|diff|advisory|triage|housekeeping) ;;
+  *) echo "usage: pd {fetch|unpack|diff|advisory|triage|housekeeping} [args...]" >&2; exit 2 ;;
+esac
+
+export GHIDRA_INSTALL_DIR="${GHIDRA_INSTALL_DIR:-{{ ghidra_install_dir }}}"
+export UV_PYTHON_DOWNLOADS=never UV_NO_CACHE=1
+umask 027
+exec /usr/local/bin/uv run --project {{ patchdiff_dir }} --frozen --no-sync \
+  python {{ patchdiff_dir }}/bin/pd_${stage}.py "$@"

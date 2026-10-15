@@ -27,3 +27,7 @@
       when: postgres_enabled | default(false)
     - role: autossh
       when: autossh_enabled | default(false)
+    - role: ghidra
+      when: ghidra_enabled | default(false)
+    - role: patchdiff
+      when: patchdiff_enabled | default(false)

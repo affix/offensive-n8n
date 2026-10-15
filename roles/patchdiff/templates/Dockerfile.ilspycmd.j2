@@ -1,0 +1,7 @@
+# Managed by Ansible. ilspycmd on the pinned .NET SDK, run by pd_unpack with
+# --network none, read-only input and a throwaway HOME.
+FROM {{ patchdiff_dotnet_sdk_image }}
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+RUN dotnet tool install --tool-path /opt/ilspy ilspycmd --version {{ patchdiff_ilspy_version }} \
+ && rm -rf /root/.nuget /tmp/*
+ENTRYPOINT ["/opt/ilspy/ilspycmd"]

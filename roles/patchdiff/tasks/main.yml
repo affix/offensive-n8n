@@ -1,0 +1,218 @@
+---
+# Toolchain and job scripts for the PD (patch diff) n8n workflows. All logic
+# lives in versioned scripts under patchdiff_dir/bin; the workflows only call
+# `pd <stage>` with arguments. Downloaded artefacts are never executed, and
+# anything that is not a plain zip/tar/deb is unpacked in a container with no
+# network and no capabilities.
+
+- name: Install host unpackers and helpers
+  ansible.builtin.apt:
+    name: "{{ patchdiff_packages }}"
+    state: present
+
+- name: Create the patchdiff directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ patchdiff_dir }}"
+    - "{{ patchdiff_dir }}/bin"
+    - "{{ patchdiff_dir }}/etc"
+    - "{{ patchdiff_dir }}/tools"
+    - "{{ patchdiff_dir }}/docker/ilspycmd"
+
+# --- Python project (uv) ----------------------------------------------------
+
+- name: Template the patchdiff pyproject
+  ansible.builtin.template:
+    src: pyproject.toml.j2
+    dest: "{{ patchdiff_dir }}/pyproject.toml"
+    owner: root
+    group: root
+    mode: "0644"
+
+# Root-owned venv, copy mode so it does not depend on root's uv cache. The
+# service user runs it with `uv run --frozen --no-sync`, never writing to it.
+- name: Sync the patchdiff virtual environment
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/uv
+      - sync
+      - --no-dev
+      - --python
+      - "{{ patchdiff_python }}"
+    chdir: "{{ patchdiff_dir }}"
+  environment:
+    UV_PYTHON_DOWNLOADS: never
+    UV_LINK_MODE: copy
+  register: patchdiff_uv_sync
+  changed_when: patchdiff_uv_sync.stderr is search('(Installed|Uninstalled|Updated) \\d+ package')
+  when: not ansible_check_mode
+
+- name: Make the venv and lock readable by the service user
+  ansible.builtin.file:
+    path: "{{ item }}"
+    mode: "u=rwX,g=rX,o=rX"
+    recurse: "{{ item.endswith('.venv') }}"
+  loop:
+    - "{{ patchdiff_dir }}/.venv"
+    - "{{ patchdiff_dir }}/uv.lock"
+  when: not ansible_check_mode
+
+# --- Job scripts ------------------------------------------------------------
+
+- name: Install the PD job scripts
+  ansible.builtin.copy:
+    src: bin/
+    dest: "{{ patchdiff_dir }}/bin/"
+    owner: root
+    group: root
+    mode: "0644"
+    directory_mode: "0755"
+
+- name: Install the pd stage wrapper
+  ansible.builtin.template:
+    src: pd.j2
+    dest: "{{ patchdiff_dir }}/bin/pd"
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Template the tool configuration read by the job scripts
+  ansible.builtin.template:
+    src: tools.json.j2
+    dest: "{{ patchdiff_dir }}/etc/tools.json"
+    owner: root
+    group: root
+    mode: "0644"
+
+# --- jadx (JAR/APK) ---------------------------------------------------------
+
+- name: Download jadx (checksum verified)
+  ansible.builtin.get_url:
+    url: "https://github.com/skylot/jadx/releases/download/v{{ patchdiff_jadx_version }}/jadx-{{ patchdiff_jadx_version }}.zip"
+    checksum: "sha256:{{ patchdiff_jadx_sha256 }}"
+    dest: "{{ patchdiff_dir }}/tools/jadx-{{ patchdiff_jadx_version }}.zip"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create the jadx directory
+  ansible.builtin.file:
+    path: "{{ patchdiff_dir }}/tools/jadx-{{ patchdiff_jadx_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The zip has no top-level directory, so unpack into a versioned one.
+- name: Unpack jadx
+  ansible.builtin.unarchive:
+    src: "{{ patchdiff_dir }}/tools/jadx-{{ patchdiff_jadx_version }}.zip"
+    dest: "{{ patchdiff_dir }}/tools/jadx-{{ patchdiff_jadx_version }}"
+    remote_src: true
+    owner: root
+    group: root
+    creates: "{{ patchdiff_dir }}/tools/jadx-{{ patchdiff_jadx_version }}/bin/jadx"
+  when: not ansible_check_mode
+
+- name: Make the jadx launcher executable
+  ansible.builtin.file:
+    path: "{{ patchdiff_dir }}/tools/jadx-{{ patchdiff_jadx_version }}/bin/jadx"
+    mode: "0755"
+  when: not ansible_check_mode
+
+# --- Container images (pinned) ----------------------------------------------
+
+- name: Check whether the pinned unblob image is present
+  ansible.builtin.command:
+    argv: [docker, image, inspect, --format, "{{ '{{' }}.Id{{ '}}' }}", "{{ patchdiff_unblob_image }}"]
+  register: patchdiff_unblob_present
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Pull the pinned unblob image
+  ansible.builtin.command:
+    argv: [docker, pull, --quiet, "{{ patchdiff_unblob_image }}"]
+  when: patchdiff_unblob_present.rc != 0
+  changed_when: true
+
+- name: Template the ilspycmd Dockerfile
+  ansible.builtin.template:
+    src: Dockerfile.ilspycmd.j2
+    dest: "{{ patchdiff_dir }}/docker/ilspycmd/Dockerfile"
+    owner: root
+    group: root
+    mode: "0644"
+  register: patchdiff_ilspy_dockerfile
+
+- name: Build the ilspycmd image
+  community.docker.docker_image_build:
+    name: patchdiff/ilspycmd
+    tag: "{{ patchdiff_ilspy_version }}"
+    path: "{{ patchdiff_dir }}/docker/ilspycmd"
+    rebuild: "{{ 'always' if patchdiff_ilspy_dockerfile is changed else 'never' }}"
+    pull: false
+
+# --- Loot layout ------------------------------------------------------------
+
+# Under loot_dir, so inside N8N_RESTRICT_FILE_ACCESS_TO. pd-sys holds
+# housekeeping job dirs and is reserved as a product name.
+- name: Create the patchdiff loot layout
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ n8n_user }}"
+    group: "{{ n8n_group }}"
+    mode: "0750"
+  loop:
+    - "{{ patchdiff_loot_dir }}"
+    - "{{ patchdiff_loot_dir }}/_inbox"
+    - "{{ patchdiff_loot_dir }}/_cache"
+    - "{{ patchdiff_loot_dir }}/_ghidra"
+    - "{{ patchdiff_loot_dir }}/pd-sys"
+
+# --- Checks as the service user ---------------------------------------------
+
+- name: Check ghidriff runs as the service user
+  ansible.builtin.command:
+    argv: [/usr/local/bin/uv, run, --project, "{{ patchdiff_dir }}", --frozen, --no-sync, ghidriff, --help]
+  environment:
+    UV_PYTHON_DOWNLOADS: never
+    UV_NO_CACHE: "1"
+  become: true
+  become_user: "{{ n8n_user }}"
+  register: patchdiff_ghidriff_help
+  changed_when: false
+  failed_when: >-
+    patchdiff_ghidriff_help.rc != 0 or
+    '--decompiler-timeout' not in patchdiff_ghidriff_help.stdout
+  when: not ansible_check_mode
+
+- name: Check PyGhidra starts the JVM against the installed Ghidra
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/uv
+      - run
+      - --project
+      - "{{ patchdiff_dir }}"
+      - --frozen
+      - --no-sync
+      - python
+      - -c
+      - "import pyghidra; pyghidra.start(); from ghidra.framework import Application; print('PD_PYGHIDRA_OK', Application.getApplicationVersion())"
+  environment:
+    HOME: "{{ n8n_dir }}"
+    GHIDRA_INSTALL_DIR: "{{ ghidra_install_dir }}"
+    UV_PYTHON_DOWNLOADS: never
+    UV_NO_CACHE: "1"
+  become: true
+  become_user: "{{ n8n_user }}"
+  register: patchdiff_pyghidra
+  changed_when: false
+  failed_when: patchdiff_pyghidra.rc != 0 or 'PD_PYGHIDRA_OK' not in patchdiff_pyghidra.stdout
+  when: not ansible_check_mode
