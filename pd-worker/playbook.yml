@@ -1,0 +1,32 @@
+---
+# Provisions a patch diff worker image. Run by Packer (see pd-worker.pkr.hcl),
+# which also handles the snapshot cleanup. group_vars is a symlink to the repo's.
+- name: Provision a patch diff worker image
+  hosts: pd_worker
+  become: true
+  vars:
+    supported_architectures:
+      aarch64: { deb: arm64, uv: aarch64-unknown-linux-gnu }
+      x86_64: { deb: amd64, uv: x86_64-unknown-linux-gnu }
+    deb_arch: "{{ supported_architectures[ansible_architecture].deb }}"
+    uv_triple: "{{ supported_architectures[ansible_architecture].uv }}"
+  pre_tasks:
+    - name: Check the worker runs Debian 13 on a supported architecture
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture in supported_architectures
+          - ansible_distribution == 'Debian' and ansible_distribution_major_version == '13'
+        fail_msg: "pd-worker expects Debian 13 (trixie), got {{ ansible_distribution }} {{ ansible_distribution_version }} {{ ansible_architecture }}"
+        quiet: true
+
+    # The AWS Debian image ships without gpg, which apt_repository in the docker role needs.
+    - name: Install gnupg for apt repository keys
+      ansible.builtin.apt:
+        name: gnupg
+        state: present
+        update_cache: true
+  roles:
+    - docker
+    - pd_worker
+    - ghidra
+    - patchdiff

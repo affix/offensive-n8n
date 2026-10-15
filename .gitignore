@@ -1,3 +1,4 @@
 inventory.yaml
 group_vars/all.yaml
 .DS_Store
+pd-worker/packer-manifest.json

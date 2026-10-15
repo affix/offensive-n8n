@@ -1,0 +1,78 @@
+---
+# Minimal host for running pd stages on a throwaway cloud worker: the n8n
+# service user the ghidra and patchdiff roles expect, plus uv. No n8n itself;
+# the Pi drives the worker over SSH.
+
+- name: Install worker base packages
+  ansible.builtin.apt:
+    name: [ca-certificates, curl, jq, rsync, tar]
+    state: present
+    update_cache: true
+
+- name: Create the service group
+  ansible.builtin.group:
+    name: "{{ n8n_group }}"
+    system: true
+
+- name: Create the service user (docker group member)
+  ansible.builtin.user:
+    name: "{{ n8n_user }}"
+    group: "{{ n8n_group }}"
+    groups: docker
+    append: true
+    system: true
+    home: "{{ n8n_dir }}"
+    create_home: false
+    shell: /bin/bash
+
+- name: Create the service user's home
+  ansible.builtin.file:
+    path: "{{ n8n_dir }}"
+    state: directory
+    owner: "{{ n8n_user }}"
+    group: "{{ n8n_group }}"
+    mode: "0750"
+
+- name: Read the installed uv version
+  ansible.builtin.command:
+    argv: [/usr/local/bin/uv, --version]
+  register: uv_installed
+  changed_when: false
+  check_mode: false
+  failed_when: false
+
+- name: Install uv at the pinned version
+  when: uv_installed.rc != 0 or uv_version not in uv_installed.stdout
+  block:
+    - name: Create a scratch directory for the uv download
+      ansible.builtin.tempfile:
+        state: directory
+      register: uv_tmp
+
+    - name: Download the uv release (checksum verified)
+      ansible.builtin.get_url:
+        url: "https://github.com/astral-sh/uv/releases/download/{{ uv_version }}/uv-{{ uv_triple }}.tar.gz"
+        checksum: "sha256:https://github.com/astral-sh/uv/releases/download/{{ uv_version }}/uv-{{ uv_triple }}.tar.gz.sha256"
+        dest: "{{ uv_tmp.path }}/uv.tar.gz"
+        mode: "0644"
+
+    - name: Unpack uv
+      ansible.builtin.unarchive:
+        src: "{{ uv_tmp.path }}/uv.tar.gz"
+        dest: "{{ uv_tmp.path }}"
+        remote_src: true
+
+    - name: Install the uv binary
+      ansible.builtin.copy:
+        src: "{{ uv_tmp.path }}/uv-{{ uv_triple }}/uv"
+        dest: /usr/local/bin/uv
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+  always:
+    - name: Remove the uv scratch directory
+      ansible.builtin.file:
+        path: "{{ uv_tmp.path }}"
+        state: absent
+      when: uv_tmp.path is defined
