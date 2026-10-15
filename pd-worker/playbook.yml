@@ -19,10 +19,11 @@
         fail_msg: "pd-worker expects Debian 13 (trixie), got {{ ansible_distribution }} {{ ansible_distribution_version }} {{ ansible_architecture }}"
         quiet: true
 
-    # The AWS Debian image ships without gpg, which apt_repository in the docker role needs.
-    - name: Install gnupg for apt repository keys
+    # The AWS Debian image ships without gpg (apt_repository in the docker role)
+    # and acl (become_user to n8n when connecting as the unprivileged admin user).
+    - name: Install gnupg and acl
       ansible.builtin.apt:
-        name: gnupg
+        name: [gnupg, acl]
         state: present
         update_cache: true
   roles:
