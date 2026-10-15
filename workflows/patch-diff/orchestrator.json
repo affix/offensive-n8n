@@ -1,0 +1,1432 @@
+{
+  "id": "hUHnI3j2uAPi0YFs",
+  "name": "PD · Orchestrator",
+  "description": "PD pipeline for one product: per-product lock, run dir + config.json, then Fetch, Unpack, Diff, Triage, Alerts via the PD Job Runner; records pd_runs/pd_versions.",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "product"
+            },
+            {
+              "name": "old_version"
+            },
+            {
+              "name": "new_version"
+            },
+            {
+              "name": "trigger"
+            }
+          ]
+        }
+      },
+      "id": "a0296d81-d212-41e2-a878-081b6af9f391",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.first().json;\nconst product = String(j.product ?? '').trim().toLowerCase();\nconst oldV = String(j.old_version ?? '').trim();\nconst newV = String(j.new_version ?? '').trim();\nconst trigger = j.trigger ? String(j.trigger) : (j.submittedAt ? 'form' : 'manual');\nif (!/^[a-z0-9][a-z0-9_-]{0,39}$/.test(product) || product === 'pd-sys') throw new Error(`Invalid product: ${product}`);\nfor (const v of [oldV, newV]) {\n  if (!/^[A-Za-z0-9][A-Za-z0-9._+~-]{0,63}$/.test(v)) throw new Error(`Invalid version: ${v}`);\n}\nif (oldV === newV) throw new Error('old_version and new_version are the same');\nreturn [{ json: { product, old_version: oldV, new_version: newV, trigger, requested_at: new Date().toISOString() } }];\n"
+      },
+      "id": "ee9500b1-7c05-444a-90e3-29e19a64d0a3",
+      "name": "Start Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        288,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "n8nUserAuth",
+        "formTitle": "Patch diff: run one product",
+        "formDescription": "Diffs two versions of a product already defined in pd_watch. Artefacts are fetched (or taken from the product inbox) by the pipeline.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Product",
+              "fieldName": "product",
+              "placeholder": "openssh",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Old version",
+              "fieldName": "old_version",
+              "placeholder": "9.8p1",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "New version",
+              "fieldName": "new_version",
+              "placeholder": "9.9p1",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "appendAttribution": false,
+          "path": "pd-run",
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Run started. Results land in #n8n-alerts and the pd_runs table."
+            }
+          }
+        }
+      },
+      "id": "b3bca6df-560c-4d76-861a-9dc983580be0",
+      "name": "Run Diff",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        288
+      ],
+      "webhookId": "b86727af-667f-419c-8de0-660d3e215d09"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_watch",
+          "cachedResultName": "pd_watch"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "product",
+              "keyValue": "={{ $json.product }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "id": "2087c777-c6b8-417e-bdb2-7f937ae593c3",
+      "name": "Get Watch Row",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        512,
+        336
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const req = $('Start Request').first().json;\nconst row = $input.all().map((i) => i.json).find((r) => r && r.product === req.product);\nif (!row) throw new Error(`No pd_watch row for ${req.product}`);\nlet options = {};\ntry { options = row.options ? JSON.parse(row.options) : {}; } catch (e) { throw new Error(`pd_watch.options for ${req.product} is not valid JSON`); }\nconst KINDS = ['source', 'elf', 'pe', 'macho', 'jar', 'dotnet', 'firmware', 'msi', 'deb', 'rpm'];\nif (!KINDS.includes(row.artefact_kind)) throw new Error(`Unknown artefact_kind ${row.artefact_kind} for ${req.product}`);\nconst stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\\.\\d+Z$/, 'Z');\nconst rand = Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0');\nconst run_id = `${stamp}-${rand}`;\nconst base = `/opt/loot/patchdiff/${req.product}`;\nconst run_dir = `${base}/${run_id}`;\nconst clamp = (v, lo, hi, d) => Math.min(Math.max(parseInt(v ?? d, 10) || d, lo), hi);\nconst limits = {\n  fetch: clamp(options.fetch_max_minutes, 5, 240, 60),\n  unpack: clamp(options.unpack_max_minutes, 5, 480, 90),\n  diff: clamp(options.diff_max_minutes, 10, 720, 240),\n  advisory: 20,\n  triage: clamp(options.triage_max_minutes, 5, 240, 60)\n};\nconst { id, createdAt, updatedAt, options: _raw, ...watch } = row;\nconst config = { ...options, ...watch, product: req.product, old_version: req.old_version, new_version: req.new_version, run_id, created_at: new Date().toISOString() };\nconst cfg_b64 = Buffer.from(JSON.stringify(config, null, 2), 'utf8').toString('base64');\nconst bundle = [\n  'set -euo pipefail',\n  'umask 027',\n  `B='${base}'; R='${run_dir}'`,\n  'mkdir -p \"$B\"',\n  'if ! mkdir \"$B/.lock\" 2>/dev/null; then',\n  '  if [ -n \"$(find \"$B/.lock\" -maxdepth 0 -mmin +960 2>/dev/null)\" ]; then rmdir \"$B/.lock\"; mkdir \"$B/.lock\"; else echo \\'{\"locked\":true}\\'; exit 0; fi',\n  'fi',\n  'mkdir -p \"$R\"',\n  `printf '%s' '${cfg_b64}' | base64 -d > \"$R/config.json\"`,\n  'echo \\'{\"locked\":false}\\''\n].join('\\n');\nreturn [{ json: { ...req, run_id, run_dir, options, limits, started_at: new Date().toISOString(), bundle_b64: Buffer.from(bundle, 'utf8').toString('base64') } }];\n"
+      },
+      "id": "410604c6-8b82-49f9-b291-744e78ab78e8",
+      "name": "Prepare Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        736,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=printf '%s' '{{ $json.bundle_b64 }}' | base64 -d | bash"
+      },
+      "id": "64df6dff-e924-4016-b343-09432d6151c3",
+      "name": "Prepare Run Dir",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        960,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ JSON.parse($json.stdout).locked }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4c7b7b2d-6b88-41b8-aa88-038a7705cf47",
+      "name": "Product Locked?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1184,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('Prepare Run').first().json;\nreturn [{ json: { product: c.product, old_version: c.old_version, new_version: c.new_version, status: 'skipped', reason: 'product locked by another run' } }];\n"
+      },
+      "id": "0067af30-483b-4e89-901a-ca2108fea990",
+      "name": "Skip Locked Product",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        752,
+        96
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const c = $('Prepare Run').first().json;\nconst { bundle_b64, ...ctx } = c;\nreturn [{ json: { ...ctx, stages: {} } }];\n"
+      },
+      "id": "099fad77-5c09-4e0b-af16-900428db110e",
+      "name": "Run Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        752,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_runs",
+          "cachedResultName": "pd_runs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_id": "={{ $json.run_id }}",
+            "product": "={{ $json.product }}",
+            "old_version": "={{ $json.old_version }}",
+            "new_version": "={{ $json.new_version }}",
+            "trigger": "={{ $json.trigger }}",
+            "run_dir": "={{ $json.run_dir }}",
+            "started_at": "={{ $json.started_at }}",
+            "status": "running",
+            "stage": "fetch"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "run_id",
+              "displayName": "run_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "product",
+              "displayName": "product",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "old_version",
+              "displayName": "old_version",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "new_version",
+              "displayName": "new_version",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "trigger",
+              "displayName": "trigger",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "run_dir",
+              "displayName": "run_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "started_at",
+              "displayName": "started_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "stage",
+              "displayName": "stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "569184ee-f248-43b1-a104-daf4a2d5864a",
+      "name": "Record Run Start",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        976,
+        192
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "EXzH4fT8pYODknxE",
+          "cachedResultName": "PD · Fetch"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "f6dd0275-22bc-4f6a-8af2-c83a015f3994",
+      "name": "Fetch",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1200,
+        272
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_runs",
+          "cachedResultName": "pd_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "run_id",
+              "keyValue": "={{ $('Run Context').first().json.run_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "stage": "unpack"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "stage",
+              "displayName": "stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "4d6dd0ac-5b1c-47a7-a9b6-f4ecb33b8ea6",
+      "name": "Stage → unpack",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1424,
+        176
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "ZD1qIKby7gNskfuT",
+          "cachedResultName": "PD · Unpack"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "f40ca9bb-6cd7-40a8-8380-e2651dba25c1",
+      "name": "Unpack",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1424,
+        368
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_runs",
+          "cachedResultName": "pd_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "run_id",
+              "keyValue": "={{ $('Run Context').first().json.run_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "stage": "diff"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "stage",
+              "displayName": "stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "5b3077a3-ff52-4da1-a3a9-8964f4da65c2",
+      "name": "Stage → diff",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1648,
+        176
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "16ubwJGxugMIFyY7",
+          "cachedResultName": "PD · Diff"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "eb66dd9d-b1a3-47ac-aff7-a795a4f41ec6",
+      "name": "Diff",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1648,
+        368
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_runs",
+          "cachedResultName": "pd_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "run_id",
+              "keyValue": "={{ $('Run Context').first().json.run_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "stage": "advisory"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "stage",
+              "displayName": "stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "74088fde-7e37-4462-91e5-d74aa245a51a",
+      "name": "Stage → advisory",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1872,
+        96
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "VlZNqmBkEWhsBHHp",
+          "cachedResultName": "PD · Triage (Ollama)"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "c5dd9fd5-7c00-4357-8367-9e49681b12a4",
+      "name": "Triage",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        2096,
+        224
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_runs",
+          "cachedResultName": "pd_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "run_id",
+              "keyValue": "={{ $('Run Context').first().json.run_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "stage": "alerts"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "stage",
+              "displayName": "stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "526e20e6-187d-42db-b50d-9ffbdccf9bac",
+      "name": "Stage → alerts",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2320,
+        -48
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "IimxwEQTveWqIUSR",
+          "cachedResultName": "PD · Alerts"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "0197a3eb-153d-49d1-b500-04c0e54af05d",
+      "name": "Alerts",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        2320,
+        144
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $('Run Context').first().json;\nconst j = $input.first().json;\nconst ORDER = ['fetch', 'unpack', 'diff', 'advisory', 'triage', 'alerts'];\nconst stages = j.stages ?? {};\nconst errRaw = j.error ?? null;\nconst failed = errRaw !== null && errRaw !== undefined;\nconst errMsg = failed ? String(errRaw.message ?? errRaw.description ?? errRaw).replace(/\\s*\\[line \\d+\\]$/, '').slice(0, 900) : '';\nconst failedStage = failed ? (ORDER.find((k) => !stages[k]) ?? 'unknown') : null;\nconst timedOut = Object.entries(stages).filter(([, s]) => s && s.timed_out).map(([k]) => k);\nconst finished = new Date();\nconst mins = Math.round((finished - new Date(ctx.started_at)) / 60000);\nconst a = stages.alerts ?? {};\nconst fetchNew = stages.fetch?.new ?? {};\nconst code = (s) => '`' + String(s).replace(/`/g, \"'\") + '`';\nconst fields = [\n  { name: 'Versions', value: `${ctx.old_version} → ${ctx.new_version}`, inline: true },\n  { name: 'Trigger', value: String(ctx.trigger), inline: true },\n  { name: 'Duration', value: `${mins} min`, inline: true }\n];\nif (timedOut.length) fields.push({ name: 'Timed out (partial results)', value: timedOut.join(', ') });\nconst warn = Object.entries(stages).flatMap(([k, s]) => (s?.warnings ?? []).slice(0, 3).map((w) => `${k}: ${w}`));\nif (warn.length) fields.push({ name: 'Warnings', value: warn.slice(0, 8).join('\\n').slice(0, 1024) });\nif (failed) fields.push({ name: `Failed at ${failedStage}`, value: ('```\\n' + errMsg + '\\n```').slice(0, 1024) });\nfields.push({ name: 'Run dir', value: code(ctx.run_dir) });\nconst status = failed ? 'failed' : (timedOut.length ? 'partial' : 'ok');\nreturn [{ json: {\n  run_id: ctx.run_id, product: ctx.product, old_version: ctx.old_version, new_version: ctx.new_version,\n  status, stage: failed ? failedStage : 'done', finished_at: finished.toISOString(),\n  candidates: a.candidates ?? stages.diff?.candidates ?? 0, silent_fixes: a.silent_fixes ?? 0, error: errMsg,\n  version_status: failed ? 'failed' : 'diffed', artefact_path: fetchNew.path ?? stages.fetch?.repo ?? '', sha256: fetchNew.sha256 ?? stages.fetch?.new?.commit ?? '',\n  notify: failed || timedOut.length > 0,\n  embed: { title: `${failed ? '❌' : '⚠️'} Patch diff run · ${ctx.product}`, color: failed ? 0x9B111E : 0xE67E22, fields, footer: { text: `PD · ${ctx.run_id}` }, timestamp: finished.toISOString() }\n} }];\n"
+      },
+      "id": "d87edcc0-5606-43a9-86e9-d0fa60906cbe",
+      "name": "Finish Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2544,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_runs",
+          "cachedResultName": "pd_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "run_id",
+              "keyValue": "={{ $json.run_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ $json.status }}",
+            "stage": "={{ $json.stage }}",
+            "finished_at": "={{ $json.finished_at }}",
+            "candidates": "={{ $json.candidates }}",
+            "silent_fixes": "={{ $json.silent_fixes }}",
+            "error": "={{ $json.error }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "stage",
+              "displayName": "stage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "finished_at",
+              "displayName": "finished_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "candidates",
+              "displayName": "candidates",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "silent_fixes",
+              "displayName": "silent_fixes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "error",
+              "displayName": "error",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "9ada3a08-2e63-4eba-ae9c-d3622b89a3f8",
+      "name": "Update Run",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2768,
+        -96
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_versions",
+          "cachedResultName": "pd_versions"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "product",
+              "keyValue": "={{ $('Finish Run').first().json.product }}"
+            },
+            {
+              "keyName": "version",
+              "keyValue": "={{ $('Finish Run').first().json.new_version }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ $('Finish Run').first().json.version_status }}",
+            "artefact_path": "={{ $('Finish Run').first().json.artefact_path }}",
+            "sha256": "={{ $('Finish Run').first().json.sha256 }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "artefact_path",
+              "displayName": "artefact_path",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "sha256",
+              "displayName": "sha256",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "88121383-2ec9-4452-99d6-e36e68615cdc",
+      "name": "Update Version",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2768,
+        96
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Finish Run').first().json.notify }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "8f10f824-bc1e-4b8e-876f-dcfff9bac6d8",
+      "name": "Worth Posting?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2768,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($('Finish Run').first().json.embed) }}"
+            }
+          ]
+        }
+      },
+      "id": "306f1261-46fc-42ed-8eac-72a629a64857",
+      "name": "Post Run Problem",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        2992,
+        288
+      ],
+      "webhookId": "cae8c410-c589-4796-a9b8-87794f7fa446",
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "command": "=P='{{ $('Run Context').first().json.product }}'\ncase \"$P\" in ''|*[!a-z0-9_-]*) echo 'bad product' >&2; exit 1;; esac\nrmdir \"/opt/loot/patchdiff/$P/.lock\" 2>/dev/null || true\necho '{\"released\":true}'"
+      },
+      "id": "0675058f-84e8-48a7-b1e7-374da163d1bf",
+      "name": "Release Lock",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        2768,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const f = $('Finish Run').first().json;\nconst { embed, ...rest } = f;\nreturn [{ json: rest }];\n"
+      },
+      "id": "80cbc496-ec9a-45c9-a609-ef169c71a55b",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2768,
+        864
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "znR5VjAmOSkzkEXm",
+          "cachedResultName": "PD · Worker"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "up",
+            "ctx": "={{ $json }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "op",
+              "displayName": "op",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "ctx",
+              "displayName": "ctx",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "9fe46174-57ae-43f4-a439-da86412f684d",
+      "name": "Worker Up",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        976,
+        384
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "znR5VjAmOSkzkEXm",
+          "cachedResultName": "PD · Worker"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "pull",
+            "ctx": "={{ $json }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "op",
+              "displayName": "op",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "ctx",
+              "displayName": "ctx",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "660794b3-d340-41e1-824c-4d3fc25223ed",
+      "name": "Pull Results",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        1872,
+        288
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "znR5VjAmOSkzkEXm",
+          "cachedResultName": "PD · Worker"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "op": "down",
+            "ctx": "={{ $('Run Context').first().json }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "op",
+              "displayName": "op",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "ctx",
+              "displayName": "ctx",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "object"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "3bdcd1b5-7bfa-4ecb-a361-182fad40296a",
+      "name": "Worker Down",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        2768,
+        672
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Start Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Request": {
+      "main": [
+        [
+          {
+            "node": "Get Watch Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Diff": {
+      "main": [
+        [
+          {
+            "node": "Start Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Watch Row": {
+      "main": [
+        [
+          {
+            "node": "Prepare Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Run": {
+      "main": [
+        [
+          {
+            "node": "Prepare Run Dir",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Run Dir": {
+      "main": [
+        [
+          {
+            "node": "Product Locked?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Product Locked?": {
+      "main": [
+        [
+          {
+            "node": "Skip Locked Product",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Run Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Context": {
+      "main": [
+        [
+          {
+            "node": "Record Run Start",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Worker Up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch": {
+      "main": [
+        [
+          {
+            "node": "Stage → unpack",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Unpack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unpack": {
+      "main": [
+        [
+          {
+            "node": "Stage → diff",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Diff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diff": {
+      "main": [
+        [
+          {
+            "node": "Stage → advisory",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Pull Results",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triage": {
+      "main": [
+        [
+          {
+            "node": "Stage → alerts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Alerts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alerts": {
+      "main": [
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finish Run": {
+      "main": [
+        [
+          {
+            "node": "Update Run",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Update Version",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Worth Posting?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Release Lock",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Return Result",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Worker Down",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Worth Posting?": {
+      "main": [
+        [
+          {
+            "node": "Post Run Problem",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Worker Up": {
+      "main": [
+        [
+          {
+            "node": "Fetch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pull Results": {
+      "main": [
+        [
+          {
+            "node": "Triage",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finish Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "errorWorkflow": "PpGzaQp9DxQSRshR",
+    "timezone": "Europe/London",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [
+    {
+      "id": "f451ecb4-4bc6-40d1-bff4-ee1b17d7cf26",
+      "name": "Intake and lock",
+      "nodeIds": [
+        "ee9500b1-7c05-444a-90e3-29e19a64d0a3",
+        "2087c777-c6b8-417e-bdb2-7f937ae593c3",
+        "410604c6-8b82-49f9-b291-744e78ab78e8",
+        "64df6dff-e924-4016-b343-09432d6151c3",
+        "4c7b7b2d-6b88-41b8-aa88-038a7705cf47"
+      ],
+      "description": "Validates product/versions, loads pd_watch, writes <run>/config.json and takes the per-product lock (stale after 16h)."
+    }
+  ],
+  "sourceWorkflowId": null,
+  "tags": []
+}

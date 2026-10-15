@@ -1,0 +1,168 @@
+{
+  "id": "ZD1qIKby7gNskfuT",
+  "name": "PD · Unpack",
+  "description": "PD stage: pd unpack extracts both artefacts (sandboxed unblob for non-plain archives), decompiles JAR/.NET, writes targets.json.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "6b7facf3-68f2-4b8c-9041-ea1f02f096e1",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "bccc1aa4-f620-46b0-84be-618f6ca8fc74",
+      "name": "Build Unpack Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STAGE = 'unpack';\nconst c = $input.first().json;\nconst SAFE = /^[A-Za-z0-9_.\\/:+~-]+$/;\nfor (const k of ['run_dir', 'product', 'old_version', 'new_version']) {\n  if (!SAFE.test(String(c[k] ?? ''))) throw new Error(`Unsafe or missing context value for ${k}: ${c[k]}`);\n}\nconst job_dir = `${c.run_dir}/${STAGE}`;\nconst q = (v) => `'${v}'`;\nconst script = [\n  '#!/usr/bin/env bash',\n  'set -euo pipefail',\n  `exec /opt/patchdiff/bin/pd ${STAGE} --job-dir ${q(job_dir)} --product ${q(c.product)} --old ${q(c.old_version)} --new ${q(c.new_version)}`,\n  ''\n].join('\\n');\nreturn [{ json: { job_dir, script, remote_host: c.remote_host ?? '', max_minutes: (c.limits ?? {})[STAGE] ?? 90 } }];\n"
+      }
+    },
+    {
+      "id": "25f03cb3-70d7-4c0f-b97e-cea5b4aad9f7",
+      "name": "Run Unpack",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "coiPnEwpk6qgJgxW",
+          "cachedResultName": "PD · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}",
+            "remote_host": "={{ $json.remote_host }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            },
+            {
+              "id": "remote_host",
+              "displayName": "remote_host",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "c23efbfa-c6a2-4aba-9430-8b6609b18633",
+      "name": "Return Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst r = $('Run Unpack').first().json;\nconst stages = { ...(ctx.stages ?? {}), unpack: { ...(r.result ?? {}), rc: r.rc, timed_out: r.timed_out } };\nreturn [{ json: { ...ctx, stages } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Build Unpack Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Unpack Script": {
+      "main": [
+        [
+          {
+            "node": "Run Unpack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Unpack": {
+      "main": [
+        [
+          {
+            "node": "Return Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

@@ -1,0 +1,289 @@
+{
+  "id": "Cgt0s5LOS9AxMCUC",
+  "name": "PD · Housekeeping",
+  "description": "Nightly: compress PD runs older than 14 days, prune unreferenced cache versions, clear stale locks, check pinned images and disk. Discord on issues plus a Monday summary.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "3fe38f6b-7417-4618-ac0e-d2098df7ab1f",
+      "name": "Nightly 03:47",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 3,
+              "triggerAtMinute": 47
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "69641de0-3321-4d2c-a52a-8ffae47904f6",
+      "name": "Build Housekeeping Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        100
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\\.\\d+Z$/, 'Z');\nconst rand = Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0');\nconst job_dir = `/opt/loot/patchdiff/pd-sys/${stamp}-${rand}/housekeeping`;\nconst script = [\n  '#!/usr/bin/env bash',\n  'set -euo pipefail',\n  `exec /opt/patchdiff/bin/pd housekeeping --job-dir '${job_dir}' --keep-days 14 --keep-runs 3 --min-free-gb 10`,\n  ''\n].join('\\n');\nreturn [{ json: { job_dir, script, max_minutes: 120 } }];\n"
+      }
+    },
+    {
+      "id": "db7f5165-7dc9-49c4-b58a-b0f9107c6b0e",
+      "name": "Run Now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "6fd11f62-93df-428b-8235-1806dcbd68fa",
+      "name": "Run Housekeeping",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        440,
+        100
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "coiPnEwpk6qgJgxW",
+          "cachedResultName": "PD · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "5907f889-16a4-4c4e-90f3-50005a1bfd35",
+      "name": "Summarise",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        100
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const r = $input.first().json;\nconst res = r.result ?? {};\nconst issues = [...(res.issues ?? [])];\nif (r.timed_out) issues.push('housekeeping timed out (partial)');\nconst now = new Date();\nconst monday = now.getUTCDay() === 1;\nconst trig = $('Run Now').isExecuted ? 'manual' : 'schedule';\nconst products = Object.entries(res.products ?? {});\nconst disk = res.disk ?? {};\nconst lines = products.slice(0, 15).map(([p, s]) => `\\`${p}\\` runs ${s.runs} · cache ${s.cache_mb}MB · ghidra ${s.ghidra_mb}MB · compressed ${s.compressed}${s.cache_pruned?.length ? ` · pruned ${s.cache_pruned.join(', ')}` : ''}`);\nconst embed = {\n  title: issues.length ? '⚠️ PD housekeeping: issues' : '🧹 PD housekeeping weekly summary',\n  color: issues.length ? 0xE67E22 : 0x2ECC71,\n  description: (lines.join('\\n') || 'No products yet.').slice(0, 3500),\n  fields: [\n    { name: 'Disk free', value: `${disk.free_gb ?? '–'}GB (${disk.free_pct ?? '–'}%)`, inline: true },\n    { name: 'Patch diff loot', value: `${res.pd_root_mb ?? '–'}MB`, inline: true },\n    { name: 'Locks cleared', value: String((res.locks_cleared ?? []).length), inline: true }\n  ],\n  footer: { text: 'PD · Housekeeping' },\n  timestamp: now.toISOString()\n};\nif (issues.length) embed.fields.push({ name: 'Issues', value: issues.slice(0, 10).join('\\n').slice(0, 1024) });\nreturn [{ json: { notify: issues.length > 0 || monday || trig === 'manual', embed } }];\n"
+      }
+    },
+    {
+      "id": "e057b5cb-9559-4a92-aa9a-63745e9e326b",
+      "name": "Worth Posting?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        100
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.notify }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "3b9bdc3a-a4f5-49f4-92a8-ef370ba51be3",
+      "name": "Post Housekeeping",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "authentication": "botToken",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "sendTo": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "webhookId": "ff566c83-3fc0-44a8-b583-d40b1a8e1bb8"
+    }
+  ],
+  "connections": {
+    "Nightly 03:47": {
+      "main": [
+        [
+          {
+            "node": "Build Housekeeping Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Housekeeping Script": {
+      "main": [
+        [
+          {
+            "node": "Run Housekeeping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Now": {
+      "main": [
+        [
+          {
+            "node": "Build Housekeeping Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Housekeeping": {
+      "main": [
+        [
+          {
+            "node": "Summarise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarise": {
+      "main": [
+        [
+          {
+            "node": "Worth Posting?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Worth Posting?": {
+      "main": [
+        [
+          {
+            "node": "Post Housekeeping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "errorWorkflow": "PpGzaQp9DxQSRshR",
+    "timezone": "Europe/London"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

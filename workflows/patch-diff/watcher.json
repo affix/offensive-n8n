@@ -1,0 +1,903 @@
+{
+  "id": "DrdX81wngD3ZyMNQ",
+  "name": "PD · Watcher",
+  "description": "Hourly: resolves the latest version of each enabled pd_watch product, records baselines on first sighting, starts a PD Orchestrator run for new versions.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "2c0aba36-39af-4bae-9714-3e29deab5312",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1,
+              "triggerAtMinute": 23
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "be1c1bea-b2cf-48e3-b460-3a2af0ef2d37",
+      "name": "Start",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const j = $input.first().json;\nconst product = String(j.product ?? '').trim().toLowerCase();\nconst trigger = j.submittedAt ? 'form' : (j.timestamp || j['Readable date'] ? 'schedule' : 'manual');\nif (product && !/^[a-z0-9][a-z0-9_-]{0,39}$/.test(product)) throw new Error(`Invalid product: ${product}`);\nreturn [{ json: { trigger, product: product || null } }];\n"
+      }
+    },
+    {
+      "id": "68c604fd-1585-4a28-b8ea-93965bbd541a",
+      "name": "Check Now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "7bece35b-e252-4f08-89f9-7c6cfa5bada6",
+      "name": "Check Product",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {
+        "authentication": "n8nUserAuth",
+        "formTitle": "Patch diff: check one product now",
+        "formDescription": "Resolves the latest version of one pd_watch product (enabled or not) and starts a diff if it is new. First sighting only records a baseline.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Product",
+              "fieldName": "product",
+              "placeholder": "openssh",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "appendAttribution": false,
+          "path": "pd-check",
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Checking. New versions start a run; results land in #n8n-alerts."
+            }
+          }
+        }
+      },
+      "webhookId": "6b55571d-1d0f-43c4-be12-7a017ac2e91f"
+    },
+    {
+      "id": "2506de63-b6f4-4aaf-aeda-3f6a14b397cc",
+      "name": "Get Watch List",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        200
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_watch",
+          "cachedResultName": "pd_watch"
+        },
+        "returnAll": true
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "42723076-0520-4074-8323-b28ef73c9326",
+      "name": "Watch Targets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const req = $('Start').first().json;\nconst rows = $input.all().map((i) => i.json).filter((r) => r && r.product);\nconst PRODUCT_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;\nconst GH = /^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+$/;\nconst out = [];\nfor (const r of rows) {\n  if (req.product ? r.product !== req.product : r.enabled !== true) continue;\n  if (!PRODUCT_RE.test(r.product) || r.product === 'pd-sys') continue;\n  const ref = String(r.source_ref ?? '').trim();\n  const st = String(r.source_type ?? '');\n  const ghRef = ref.replace(/^https:\\/\\/github\\.com\\//, '').replace(/\\.git$/, '');\n  let fetch_mode = 'http';\n  let url = '';\n  let cmd = '';\n  if (st === 'github_release') url = `https://api.github.com/repos/${ghRef}/releases?per_page=30`;\n  else if (st === 'git_tags') {\n    if (GH.test(ghRef)) url = `https://api.github.com/repos/${ghRef}/tags?per_page=100`;\n    else if (/^https:\\/\\/[A-Za-z0-9.-]+\\/[A-Za-z0-9._\\/-]+$/.test(ref)) { fetch_mode = 'cmd'; cmd = 'git'; }\n  } else if (st === 'registry') {\n    const i = ref.indexOf(':');\n    const eco = ref.slice(0, i);\n    const pkg = ref.slice(i + 1);\n    const enc = encodeURIComponent(pkg);\n    const [g, a] = pkg.split(':');\n    url = {\n      pypi: `https://pypi.org/pypi/${enc}/json`,\n      npm: `https://registry.npmjs.org/${pkg.replace('/', '%2F')}`,\n      crates: `https://crates.io/api/v1/crates/${enc}`,\n      nuget: `https://api.nuget.org/v3-flatcontainer/${pkg.toLowerCase()}/index.json`,\n      maven: `https://search.maven.org/solrsearch/select?q=${encodeURIComponent(`g:\"${g}\" AND a:\"${a}\"`)}&core=gav&rows=50&wt=json`,\n      packagist: `https://repo.packagist.org/p2/${pkg}.json`,\n      rubygems: `https://rubygems.org/api/v1/versions/${enc}.json`,\n      go: `https://proxy.golang.org/${pkg.toLowerCase()}/@v/list`\n    }[eco] ?? '';\n  } else if (st === 'docker_tag') {\n    const repo = ref.includes('/') ? ref : `library/${ref}`;\n    url = `https://hub.docker.com/v2/repositories/${repo}/tags?page_size=100&ordering=last_updated`;\n  } else if (st === 'rss') url = ref;\n  else if (st === 'vendor_page') { url = ref; fetch_mode = 'html'; }\n  else if (st === 'inbox') { fetch_mode = 'cmd'; cmd = 'inbox'; }\n  if (fetch_mode !== 'cmd' && !/^https:\\/\\//.test(url)) {\n    out.push({ json: { product: r.product, source_type: st, source_ref: ref, fetch_mode: 'skip', error: `cannot build a source URL for ${st} ${ref}` } });\n    continue;\n  }\n  out.push({ json: { product: r.product, source_type: st, source_ref: ref, url, fetch_mode, cmd, version_regex: r.version_regex ?? '', selector: r.selector ?? '', options: r.options ?? '' } });\n}\nif (!out.length && req.product) throw new Error(`No pd_watch row for ${req.product}`);\nreturn out;\n"
+      }
+    },
+    {
+      "id": "b82209ec-cd29-4e62-bd3d-1f70eefb2979",
+      "name": "Fetch Mode",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1100,
+        200
+      ],
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 4,
+        "output": "={{ ({ http: 0, html: 1, cmd: 2 })[$json.fetch_mode] ?? 3 }}"
+      }
+    },
+    {
+      "id": "b4bb8d53-58d9-4eaa-8b8b-217fea64c923",
+      "name": "Query Source",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "patchdiff-watcher/1.0"
+            },
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json, application/json, application/rss+xml, */*"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "e0c71499-1d3a-4262-b545-68e6e92156bc",
+      "name": "Extract Versions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const tok = (v) => {\n  const out = [];\n  const re = /([._+~-]?)(\\d+|[A-Za-z]+)/g;\n  let m;\n  while ((m = re.exec(String(v))) !== null) out.push({ sep: m[1], v: /^\\d+$/.test(m[2]) ? Number(m[2]) : m[2].toLowerCase() });\n  return out;\n};\nconst tail = (t) => (t.sep === '+' || typeof t.v === 'number' || (t.sep === '' && typeof t.v === 'string') ? 1 : -1);\nconst cmp = (a, b) => {\n  const x = tok(a);\n  const y = tok(b);\n  for (let i = 0; i < Math.max(x.length, y.length); i++) {\n    const p = x[i];\n    const q = y[i];\n    if (p === undefined) return -tail(q);\n    if (q === undefined) return tail(p);\n    if (p.v === q.v) continue;\n    if (typeof p.v === 'number' && typeof q.v === 'number') return p.v - q.v;\n    if (typeof p.v === 'number') return 1;\n    if (typeof q.v === 'number') return -1;\n    return p.v < q.v ? -1 : 1;\n  }\n  return 0;\n};\nconst p = $('Each Product').first().json;\nconst j = $input.first().json;\nlet opts = {};\ntry { opts = p.options ? JSON.parse(p.options) : {}; } catch (e) { opts = {}; }\nconst res = { product: p.product, source_type: p.source_type, latest: null, seen: 0, error: null };\nif (p.fetch_mode === 'skip') return [{ json: { ...res, error: p.error } }];\nif (j.error) return [{ json: { ...res, error: String(j.error.message ?? j.error).slice(0, 300) } }];\nconst parse = () => { try { return JSON.parse(j.data); } catch (e) { return null; } };\nlet raw = [];\ntry {\n  switch (p.source_type) {\n    case 'github_release':\n      raw = (parse() ?? []).filter((r) => !r.draft && (opts.include_prerelease || !r.prerelease)).map((r) => r.tag_name);\n      break;\n    case 'git_tags':\n      raw = p.fetch_mode === 'cmd' ? JSON.parse(j.stdout || '[]') : (parse() ?? []).map((t) => t.name);\n      break;\n    case 'registry': {\n      const d = parse() ?? {};\n      const eco = p.source_ref.split(':')[0];\n      if (eco === 'pypi') raw = Object.keys(d.releases ?? {}).filter((v) => (d.releases[v] ?? []).some((f) => !f.yanked));\n      else if (eco === 'npm') raw = Object.keys(d.versions ?? {});\n      else if (eco === 'crates') raw = (d.versions ?? []).filter((v) => !v.yanked).map((v) => v.num);\n      else if (eco === 'nuget') raw = d.versions ?? [];\n      else if (eco === 'maven') raw = (d.response?.docs ?? []).map((x) => x.v);\n      else if (eco === 'packagist') raw = Object.values(d.packages ?? {}).flat().map((x) => x.version);\n      else if (eco === 'rubygems') raw = (Array.isArray(d) ? d : []).filter((x) => !x.prerelease).map((x) => x.number);\n      else if (eco === 'go') raw = String(j.data ?? '').split('\\n');\n      break;\n    }\n    case 'docker_tag':\n      raw = ((parse() ?? {}).results ?? []).map((t) => t.name);\n      break;\n    case 'rss':\n      raw = [...String(j.data ?? '').matchAll(/<(title|link)[^>]*>([\\s\\S]*?)<\\/\\1>/g)].map((m) => m[2]);\n      break;\n    case 'vendor_page':\n      raw = [].concat(j.versions ?? []);\n      break;\n    case 'inbox':\n      raw = JSON.parse(j.stdout || '[]');\n      break;\n  }\n} catch (e) {\n  return [{ json: { ...res, error: `parse failed: ${e.message}` } }];\n}\nlet re;\ntry { re = p.version_regex ? new RegExp(p.version_regex) : /(\\d+(?:\\.\\d+)+(?:p\\d+|[a-z](?![a-z]))?)/; } catch (e) { return [{ json: { ...res, error: `bad version_regex: ${e.message}` } }]; }\nconst PRE = /(alpha|beta|rc|pre|dev|snapshot|nightly|canary|preview)/i;\nconst vs = new Set();\nfor (const s of raw) {\n  const m = String(s ?? '').match(re);\n  if (!m) continue;\n  const v = String(m[1] ?? m[0]).trim();\n  if (!/^[A-Za-z0-9][A-Za-z0-9._+~-]{0,63}$/.test(v)) continue;\n  if (!opts.include_prerelease && PRE.test(v)) continue;\n  vs.add(v);\n}\nconst sorted = [...vs].sort(cmp);\nconst latest = sorted.at(-1) ?? null;\nreturn [{ json: { ...res, seen: sorted.length, latest, error: latest ? null : `no versions matched ${re}` } }];\n"
+      }
+    },
+    {
+      "id": "d41d38ef-55b6-4dd0-89d2-ce0b7aefeb91",
+      "name": "Fetch Vendor Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        200
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (patchdiff-watcher)"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          }
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "79556cb9-c6f7-41b8-98ed-998a36a6b5b4",
+      "name": "Extract With Selector",
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1.2,
+      "position": [
+        1540,
+        200
+      ],
+      "parameters": {
+        "operation": "extractHtmlContent",
+        "sourceData": "json",
+        "dataPropertyName": "data",
+        "extractionValues": {
+          "values": [
+            {
+              "key": "versions",
+              "cssSelector": "={{ $('Each Product').item.json.selector || 'a' }}",
+              "returnValue": "text",
+              "returnArray": true
+            }
+          ]
+        },
+        "options": {
+          "trimValues": true,
+          "cleanUpText": true
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "2fe22875-43fc-4387-af63-8f5839bd18e1",
+      "name": "List Inbox Or Tags",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1320,
+        400
+      ],
+      "parameters": {
+        "executeOnce": true,
+        "command": "=P='{{ $json.product }}'\ncase \"$P\" in ''|*[!a-z0-9_-]*) echo 'bad product' >&2; exit 1;; esac\nif [ '{{ $json.cmd }}' = inbox ]; then\n  D=\"/opt/loot/patchdiff/_inbox/$P\"\n  mkdir -p \"$D\"\n  ls -1 \"$D\" | jq -Rsc 'split(\"\\n\") | map(select(length > 0))'\nelse\n  U='{{ $json.source_ref }}'\n  case \"$U\" in https://*) ;; *) echo 'bad url' >&2; exit 1;; esac\n  case \"$U\" in *[!A-Za-z0-9._/:@-]*) echo 'bad url' >&2; exit 1;; esac\n  GIT_TERMINAL_PROMPT=0 timeout 120 git -c protocol.file.allow=never ls-remote --tags --refs \"$U\" | awk '{print $2}' | sed 's#^refs/tags/##' | jq -Rsc 'split(\"\\n\") | map(select(length > 0))'\nfi"
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "4a6dae22-14a2-46bf-a6b1-d210576856b6",
+      "name": "Each Product",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        880,
+        200
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "134abb43-c6fc-4fa0-acb4-7b7c609d66a8",
+      "name": "Get Known Versions",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1980,
+        200
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_versions",
+          "cachedResultName": "pd_versions"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "product",
+              "condition": "eq",
+              "keyValue": "={{ $json.product }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "bac23dac-da24-40b2-88f1-d30001d27196",
+      "name": "Decide",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const tok = (v) => {\n  const out = [];\n  const re = /([._+~-]?)(\\d+|[A-Za-z]+)/g;\n  let m;\n  while ((m = re.exec(String(v))) !== null) out.push({ sep: m[1], v: /^\\d+$/.test(m[2]) ? Number(m[2]) : m[2].toLowerCase() });\n  return out;\n};\nconst tail = (t) => (t.sep === '+' || typeof t.v === 'number' || (t.sep === '' && typeof t.v === 'string') ? 1 : -1);\nconst cmp = (a, b) => {\n  const x = tok(a);\n  const y = tok(b);\n  for (let i = 0; i < Math.max(x.length, y.length); i++) {\n    const p = x[i];\n    const q = y[i];\n    if (p === undefined) return -tail(q);\n    if (q === undefined) return tail(p);\n    if (p.v === q.v) continue;\n    if (typeof p.v === 'number' && typeof q.v === 'number') return p.v - q.v;\n    if (typeof p.v === 'number') return 1;\n    if (typeof q.v === 'number') return -1;\n    return p.v < q.v ? -1 : 1;\n  }\n  return 0;\n};\nconst x = $('Extract Versions').first().json;\nconst known = $input.all().map((i) => i.json).filter((r) => r && r.product === x.product && r.version).map((r) => String(r.version));\nlet action = 'none';\nlet old_version = null;\nif (x.error || !x.latest) action = 'error';\nelse if (!known.length) action = 'baseline';\nelse {\n  const top = [...known].sort(cmp).at(-1);\n  if (cmp(x.latest, top) > 0) { action = 'new'; old_version = top; }\n}\nlet notify_error = false;\nif (action === 'error') {\n  const sd = $getWorkflowStaticData('global');\n  sd.errs = sd.errs ?? {};\n  if (Date.now() - (sd.errs[x.product] ?? 0) > 86400000) { notify_error = true; sd.errs[x.product] = Date.now(); }\n}\nconst embed = notify_error ? {\n  title: `⚠️ PD Watcher · ${x.product}: cannot resolve latest version`,\n  color: 0xE67E22,\n  description: '```\\n' + String(x.error).slice(0, 900) + '\\n```',\n  footer: { text: 'PD · Watcher (repeats at most daily)' },\n  timestamp: new Date().toISOString()\n} : null;\nreturn [{ json: { product: x.product, latest: x.latest, old_version, action, error: x.error, notify_error, embed, seen: x.seen, now: new Date().toISOString() } }];\n"
+      }
+    },
+    {
+      "id": "217ea16c-c51f-4764-bda3-264a8bde4a1b",
+      "name": "Route Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2420,
+        200
+      ],
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 4,
+        "output": "={{ $json.action === 'baseline' ? 0 : $json.action === 'new' ? 1 : ($json.action === 'error' && $json.notify_error) ? 2 : 3 }}"
+      }
+    },
+    {
+      "id": "1f00aacd-c19f-4a8c-bd8f-060bd79e35cd",
+      "name": "Record Baseline",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2640,
+        0
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_versions",
+          "cachedResultName": "pd_versions"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "product": "={{ $('Decide').item.json.product }}",
+            "version": "={{ $('Decide').item.json.latest }}",
+            "seen_at": "={{ $('Decide').item.json.now }}",
+            "status": "baseline"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "product",
+              "displayName": "product",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "version",
+              "displayName": "version",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "seen_at",
+              "displayName": "seen_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b4d0df06-7167-41da-8460-86ff3de3be55",
+      "name": "Record New Version",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2640,
+        200
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "DATA_TABLE_pd_versions",
+          "cachedResultName": "pd_versions"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "product": "={{ $('Decide').item.json.product }}",
+            "version": "={{ $('Decide').item.json.latest }}",
+            "seen_at": "={{ $('Decide').item.json.now }}",
+            "status": "new"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "product",
+              "displayName": "product",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "version",
+              "displayName": "version",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "seen_at",
+              "displayName": "seen_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "9553a7f9-2538-4892-abff-e81eaaac1246",
+      "name": "Start Diff Run",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        2860,
+        200
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "hUHnI3j2uAPi0YFs",
+          "cachedResultName": "PD · Orchestrator"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "product": "={{ $('Decide').item.json.product }}",
+            "old_version": "={{ $('Decide').item.json.old_version }}",
+            "new_version": "={{ $('Decide').item.json.latest }}",
+            "trigger": "watcher"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "product",
+              "displayName": "product",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "old_version",
+              "displayName": "old_version",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "new_version",
+              "displayName": "new_version",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "trigger",
+              "displayName": "trigger",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "b0e1d1f5-b0b5-4958-8135-61e76f7a4a71",
+      "name": "Post Source Error",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        400
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "authentication": "botToken",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "sendTo": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "webhookId": "28a7822c-5447-40e0-b48f-5df7d6650dd1"
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [
+        [
+          {
+            "node": "Start",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Get Watch List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Now": {
+      "main": [
+        [
+          {
+            "node": "Start",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Product": {
+      "main": [
+        [
+          {
+            "node": "Start",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Watch List": {
+      "main": [
+        [
+          {
+            "node": "Watch Targets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Watch Targets": {
+      "main": [
+        [
+          {
+            "node": "Each Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Mode": {
+      "main": [
+        [
+          {
+            "node": "Query Source",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Vendor Page",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "List Inbox Or Tags",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Versions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query Source": {
+      "main": [
+        [
+          {
+            "node": "Extract Versions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Versions": {
+      "main": [
+        [
+          {
+            "node": "Get Known Versions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Vendor Page": {
+      "main": [
+        [
+          {
+            "node": "Extract With Selector",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract With Selector": {
+      "main": [
+        [
+          {
+            "node": "Extract Versions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Inbox Or Tags": {
+      "main": [
+        [
+          {
+            "node": "Extract Versions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Each Product": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Fetch Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Known Versions": {
+      "main": [
+        [
+          {
+            "node": "Decide",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide": {
+      "main": [
+        [
+          {
+            "node": "Route Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Action": {
+      "main": [
+        [
+          {
+            "node": "Record Baseline",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record New Version",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Post Source Error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Each Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Baseline": {
+      "main": [
+        [
+          {
+            "node": "Each Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record New Version": {
+      "main": [
+        [
+          {
+            "node": "Start Diff Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Diff Run": {
+      "main": [
+        [
+          {
+            "node": "Each Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Source Error": {
+      "main": [
+        [
+          {
+            "node": "Each Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "errorWorkflow": "PpGzaQp9DxQSRshR",
+    "timezone": "Europe/London"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [
+    {
+      "id": "7d2bbbd8-f2b5-4226-bae7-60f3e9aa22aa",
+      "name": "Resolve latest version",
+      "nodeIds": [
+        "e0c71499-1d3a-4262-b545-68e6e92156bc",
+        "134abb43-c6fc-4fa0-acb4-7b7c609d66a8",
+        "bac23dac-da24-40b2-88f1-d30001d27196"
+      ],
+      "description": "Pull versions out of the source response, version_regex filter, semver-aware max, compare with pd_versions."
+    }
+  ],
+  "sourceWorkflowId": null,
+  "tags": []
+}

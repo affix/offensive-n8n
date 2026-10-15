@@ -1,0 +1,168 @@
+{
+  "id": "EXzH4fT8pYODknxE",
+  "name": "PD · Fetch",
+  "description": "PD stage: pd fetch downloads both versions into _cache (sha256, size caps) or clones the repo for source kind.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "2dbde9e0-7ebf-4be7-99e3-5cc69cd66fd1",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "a1aaef43-de00-4c55-b7be-4351209a86c4",
+      "name": "Build Fetch Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STAGE = 'fetch';\nconst c = $input.first().json;\nconst SAFE = /^[A-Za-z0-9_.\\/:+~-]+$/;\nfor (const k of ['run_dir', 'product', 'old_version', 'new_version']) {\n  if (!SAFE.test(String(c[k] ?? ''))) throw new Error(`Unsafe or missing context value for ${k}: ${c[k]}`);\n}\nconst job_dir = `${c.run_dir}/${STAGE}`;\nconst q = (v) => `'${v}'`;\nconst script = [\n  '#!/usr/bin/env bash',\n  'set -euo pipefail',\n  `exec /opt/patchdiff/bin/pd ${STAGE} --job-dir ${q(job_dir)} --product ${q(c.product)} --old ${q(c.old_version)} --new ${q(c.new_version)}`,\n  ''\n].join('\\n');\nreturn [{ json: { job_dir, script, remote_host: c.remote_host ?? '', max_minutes: (c.limits ?? {})[STAGE] ?? 60 } }];\n"
+      }
+    },
+    {
+      "id": "fe3fe8fb-3d51-4547-8695-5c9eb0bdea49",
+      "name": "Run Fetch",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "coiPnEwpk6qgJgxW",
+          "cachedResultName": "PD · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}",
+            "remote_host": "={{ $json.remote_host }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            },
+            {
+              "id": "remote_host",
+              "displayName": "remote_host",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "1f232b0a-09c6-4e9a-bf96-1dbe109351df",
+      "name": "Return Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst r = $('Run Fetch').first().json;\nconst stages = { ...(ctx.stages ?? {}), fetch: { ...(r.result ?? {}), rc: r.rc, timed_out: r.timed_out } };\nreturn [{ json: { ...ctx, stages } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Build Fetch Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Fetch Script": {
+      "main": [
+        [
+          {
+            "node": "Run Fetch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Fetch": {
+      "main": [
+        [
+          {
+            "node": "Return Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

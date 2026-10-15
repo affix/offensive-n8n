@@ -1,0 +1,276 @@
+{
+  "id": "VlZNqmBkEWhsBHHp",
+  "name": "PD · Triage (Ollama)",
+  "description": "PD stage: advisory match (vendor feed, GHSA, NVD) then Ollama triage of up to 25 candidates. Advisory only, never suppresses a candidate.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "512e87ae-88f2-403f-810f-525d48afcbe1",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "9a5bf7fd-4828-4d13-81fe-0359d946ac1d",
+      "name": "Build Advisory Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STAGE = 'advisory';\nconst c = $('When Called').first().json;\nconst SAFE = /^[A-Za-z0-9_.\\/:+~-]+$/;\nfor (const k of ['run_dir', 'product', 'old_version', 'new_version']) {\n  if (!SAFE.test(String(c[k] ?? ''))) throw new Error(`Unsafe or missing context value for ${k}: ${c[k]}`);\n}\nconst job_dir = `${c.run_dir}/${STAGE}`;\nconst q = (v) => `'${v}'`;\nconst script = [\n  '#!/usr/bin/env bash',\n  'set -euo pipefail',\n  `exec /opt/patchdiff/bin/pd ${STAGE} --job-dir ${q(job_dir)} --product ${q(c.product)} --old ${q(c.old_version)} --new ${q(c.new_version)}`,\n  ''\n].join('\\n');\nreturn [{ json: { job_dir, script, max_minutes: (c.limits ?? {})[STAGE] ?? 20 } }];\n"
+      }
+    },
+    {
+      "id": "1c2488e4-577c-47ac-859e-2cd02cb7a403",
+      "name": "Run Advisory",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "coiPnEwpk6qgJgxW",
+          "cachedResultName": "PD · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "25a6614b-aaa0-4304-a51f-429cdc5da6b8",
+      "name": "Build Triage Script",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const STAGE = 'triage';\nconst c = $('When Called').first().json;\nconst SAFE = /^[A-Za-z0-9_.\\/:+~-]+$/;\nfor (const k of ['run_dir', 'product', 'old_version', 'new_version']) {\n  if (!SAFE.test(String(c[k] ?? ''))) throw new Error(`Unsafe or missing context value for ${k}: ${c[k]}`);\n}\nconst job_dir = `${c.run_dir}/${STAGE}`;\nconst q = (v) => `'${v}'`;\nconst script = [\n  '#!/usr/bin/env bash',\n  'set -euo pipefail',\n  `exec /opt/patchdiff/bin/pd ${STAGE} --job-dir ${q(job_dir)} --product ${q(c.product)} --old ${q(c.old_version)} --new ${q(c.new_version)}`,\n  ''\n].join('\\n');\nreturn [{ json: { job_dir, script, max_minutes: (c.limits ?? {})[STAGE] ?? 60 } }];\n"
+      }
+    },
+    {
+      "id": "920cc808-d20e-45fc-be18-2ba565d37b2b",
+      "name": "Run Triage",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.4,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "mode": "once",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "coiPnEwpk6qgJgxW",
+          "cachedResultName": "PD · Job Runner"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "job_dir": "={{ $json.job_dir }}",
+            "script": "={{ $json.script }}",
+            "max_minutes": "={{ $json.max_minutes }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "job_dir",
+              "displayName": "job_dir",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "script",
+              "displayName": "script",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "max_minutes",
+              "displayName": "max_minutes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "cf0ac578-9172-4c82-9828-fe6d3eb2f92e",
+      "name": "Return Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst a = $('Run Advisory').first().json;\nconst t = $('Run Triage').first().json;\nconst stages = { ...(ctx.stages ?? {}), advisory: { ...(a.result ?? {}), rc: a.rc, timed_out: a.timed_out }, triage: { ...(t.result ?? {}), rc: t.rc, timed_out: t.timed_out } };\nreturn [{ json: { ...ctx, stages } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Build Advisory Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Advisory Script": {
+      "main": [
+        [
+          {
+            "node": "Run Advisory",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Advisory": {
+      "main": [
+        [
+          {
+            "node": "Build Triage Script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Triage Script": {
+      "main": [
+        [
+          {
+            "node": "Run Triage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Triage": {
+      "main": [
+        [
+          {
+            "node": "Return Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [
+    {
+      "id": "b49d40d3-ee1c-40fb-8cd3-f346cd75ae01",
+      "name": "Advisory match",
+      "nodeIds": [
+        "9a5bf7fd-4828-4d13-81fe-0359d946ac1d",
+        "1c2488e4-577c-47ac-859e-2cd02cb7a403"
+      ],
+      "description": "pd advisory: vendor feed, GHSA and NVD entries for the version range; marks candidates an advisory names."
+    },
+    {
+      "id": "4f71edce-c6ba-426c-9dd4-450df4a79d90",
+      "name": "LLM triage",
+      "nodeIds": [
+        "25a6614b-aaa0-4304-a51f-429cdc5da6b8",
+        "920cc808-d20e-45fc-be18-2ba565d37b2b"
+      ],
+      "description": "pd triage: Ollama /api/chat per candidate (max 25), JSON bug_class / likely_security_fix. Advisory only."
+    }
+  ],
+  "sourceWorkflowId": null,
+  "tags": []
+}

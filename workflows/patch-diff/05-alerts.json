@@ -1,0 +1,425 @@
+{
+  "id": "IimxwEQTveWqIUSR",
+  "name": "PD · Alerts",
+  "description": "PD stage: records new findings in Postgres pd_findings (dedupe by key), posts one Discord summary per run and a separate @here message for new silent-fix candidates.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "b3eed689-88a4-4fe2-9d9a-f77169315540",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "6ceed52c-843a-457b-a5ba-a01314e36022",
+      "name": "Ensure Schema",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        220,
+        200
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS pd_findings (\n  key text PRIMARY KEY,\n  run_id text NOT NULL,\n  product text NOT NULL,\n  old_version text,\n  new_version text,\n  kind text,\n  location text,\n  score numeric,\n  signals jsonb,\n  advisory_match text,\n  silent_fix boolean NOT NULL DEFAULT false,\n  llm_bug_class text,\n  llm_summary text,\n  llm_confidence text,\n  llm_likely_security_fix int,\n  llm_entry_point text,\n  artefact_path text,\n  first_seen timestamptz NOT NULL DEFAULT now(),\n  alerted_at timestamptz\n);\nCREATE INDEX IF NOT EXISTS pd_findings_product_idx ON pd_findings (product, new_version);\nCREATE INDEX IF NOT EXISTS pd_findings_silent_idx ON pd_findings (first_seen) WHERE silent_fix;",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "04fa80dd-c22f-4555-a978-7c3b785cfe27",
+      "name": "Read Triaged",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        440,
+        200
+      ],
+      "parameters": {
+        "executeOnce": true,
+        "command": "=R='{{ $('When Called').first().json.run_dir }}'\ncase \"$R\" in /opt/loot/patchdiff/*/2*Z-*) ;; *) echo 'bad run dir' >&2; exit 1;; esac\nF=\"$R/triage/triaged.json\"\n[ -s \"$F\" ] || F=\"$R/advisory/candidates.json\"\n[ -s \"$F\" ] || F=\"$R/diff/candidates.json\"\nif [ -s \"$F\" ]; then\n  jq -c '[.[:25][] | {key, kind, location, score, rank, signals: (.signals.hits // {}), advisory_match, llm_bug_class, llm_likely_security_fix, llm_summary, llm_confidence, llm_entry_point}]' \"$F\"\nelse\n  echo '[]'\nfi"
+      }
+    },
+    {
+      "id": "c3886e77-e5c8-46ff-9e6e-2f491d81f574",
+      "name": "Build Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst opts = ctx.options ?? {};\nconst TH = Math.min(Math.max(parseInt(opts.silent_fix_threshold ?? 60, 10) || 60, 1), 100);\nconst cands = JSON.parse($input.first().json.stdout || '[]');\nconst art = `${ctx.run_dir}/diff/candidates.json`;\nconst rows = cands.filter((c) => c && c.key).map((c) => ({\n  key: c.key, run_id: ctx.run_id, product: ctx.product, old_version: ctx.old_version, new_version: ctx.new_version,\n  kind: c.kind, location: String(c.location ?? '').slice(0, 500), score: Number(c.score ?? 0), signals: c.signals ?? {},\n  advisory_match: c.advisory_match ?? null,\n  silent_fix: Number.isInteger(c.llm_likely_security_fix) && c.llm_likely_security_fix >= TH && !c.advisory_match,\n  llm_bug_class: c.llm_bug_class ?? '', llm_summary: c.llm_summary ?? '', llm_confidence: c.llm_confidence ?? '',\n  llm_likely_security_fix: Number.isInteger(c.llm_likely_security_fix) ? c.llm_likely_security_fix : null,\n  llm_entry_point: c.llm_entry_point ?? '', artefact_path: art, rank: c.rank ?? null\n}));\nreturn [{ json: { n: rows.length, threshold: TH, rows: JSON.stringify(rows) } }];\n"
+      }
+    },
+    {
+      "id": "ee65cf9f-ac94-4920-be20-9c1a079a4b72",
+      "name": "Record New Findings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        880,
+        200
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO pd_findings AS f (key, run_id, product, old_version, new_version, kind, location, score, signals, advisory_match, silent_fix, llm_bug_class, llm_summary, llm_confidence, llm_likely_security_fix, llm_entry_point, artefact_path)\nSELECT r.key, r.run_id, r.product, r.old_version, r.new_version, r.kind, r.location, r.score, r.signals, r.advisory_match, r.silent_fix, r.llm_bug_class, r.llm_summary, r.llm_confidence, r.llm_likely_security_fix, r.llm_entry_point, r.artefact_path\nFROM jsonb_to_recordset($1::jsonb) AS r(key text, run_id text, product text, old_version text, new_version text, kind text, location text, score numeric, signals jsonb, advisory_match text, silent_fix boolean, llm_bug_class text, llm_summary text, llm_confidence text, llm_likely_security_fix int, llm_entry_point text, artefact_path text)\nON CONFLICT (key) DO NOTHING\nRETURNING key;",
+        "options": {
+          "queryReplacement": "={{ [$json.rows] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "f987e808-cbe9-4982-bbd7-0803651d0c91",
+      "name": "Alert Embeds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst built = $('Build Rows').first().json;\nconst rows = JSON.parse(built.rows);\nconst fresh = new Set($input.all().map((i) => i.json.key).filter(Boolean));\nconst cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };\nconst code = (s) => '`' + String(s).replace(/`/g, \"'\") + '`';\nconst llm = (r) => (r.llm_likely_security_fix ?? -1);\nconst top = [...rows].sort((a, b) => llm(b) - llm(a) || b.score - a.score).slice(0, 5);\nconst line = (r) => [\n  `${r.silent_fix ? '🤫 ' : ''}${code(cut(r.location, 120))}`,\n  `score ${r.score} · LLM ${r.llm_likely_security_fix ?? '–'}/100 · ${cut(r.llm_bug_class || 'unclassified', 60)}${r.advisory_match ? ` · ${r.advisory_match}` : ''}${fresh.has(r.key) ? '' : ' · seen before'}`,\n  cut(r.llm_summary || 'no triage summary', 220)\n].join('\\n');\nconst silent = rows.filter((r) => r.silent_fix && fresh.has(r.key));\nconst st = ctx.stages ?? {};\nconst now = new Date().toISOString();\nconst embed = {\n  title: cut(`🔍 Patch diff · ${ctx.product} ${ctx.old_version} → ${ctx.new_version}`, 256),\n  color: silent.length ? 0xE74C3C : rows.length ? 0xE67E22 : 0x95A5A6,\n  description: cut(top.length ? top.map(line).join('\\n\\n') : 'No candidate scored above zero.', 4000),\n  fields: [\n    { name: 'Candidates', value: String(rows.length), inline: true },\n    { name: 'New findings', value: String(fresh.size), inline: true },\n    { name: 'Silent fixes (new)', value: String(silent.length), inline: true },\n    { name: 'Advisories in range', value: String(st.advisory?.advisories_relevant ?? '–'), inline: true },\n    { name: 'Diff mode', value: String(st.diff?.mode ?? '–'), inline: true },\n    { name: 'Artefacts', value: code(ctx.run_dir), inline: false }\n  ],\n  footer: { text: `PD · ${ctx.run_id}` },\n  timestamp: now\n};\nconst silentEmbed = silent.length ? {\n  title: cut(`🤫 Silent fix candidates · ${ctx.product} ${ctx.new_version}`, 256),\n  color: 0x9B111E,\n  description: cut(silent.slice(0, 8).map(line).join('\\n\\n'), 4000),\n  fields: [\n    { name: 'Why', value: `LLM likely_security_fix ≥ ${built.threshold} and no matching advisory`, inline: false },\n    { name: 'Candidates file', value: code(`${ctx.run_dir}/diff/candidates.json`), inline: false }\n  ],\n  footer: { text: `PD · ${ctx.run_id}` },\n  timestamp: now\n} : null;\nconst alerted = [...new Set([...top.map((r) => r.key), ...silent.map((r) => r.key)])].filter((k) => fresh.has(k));\nreturn [{ json: {\n  embed, silent_embed: silentEmbed, has_silent: silentEmbed !== null, alerted_keys: JSON.stringify(alerted),\n  new_findings: fresh.size, silent_fixes: silent.length, candidates: rows.length\n} }];\n"
+      }
+    },
+    {
+      "id": "66d7fc95-deb2-4432-b97d-edfbf207bfbc",
+      "name": "Post Run Summary",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        200
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "authentication": "botToken",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "sendTo": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "webhookId": "a26488eb-63d9-4a1b-9851-b49f996847d9"
+    },
+    {
+      "id": "ef133bd9-efdd-4b68-b092-ad6a59c75a90",
+      "name": "Silent Fixes?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Alert Embeds').first().json.has_silent }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "282d0248-013a-445f-bea6-1f1d44028d68",
+      "name": "Post Silent Fixes",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        100
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "authentication": "botToken",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "sendTo": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "content": "@here silent fix candidates",
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($('Alert Embeds').first().json.silent_embed) }}"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "webhookId": "f6779d86-736d-4bb4-89dc-3384ac0bcf4c"
+    },
+    {
+      "id": "cb7b3412-201e-4c1b-a929-8245d6feb6c5",
+      "name": "Mark Alerted",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1980,
+        200
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE pd_findings SET alerted_at = now()\nWHERE key IN (SELECT jsonb_array_elements_text($1::jsonb)) AND alerted_at IS NULL\nRETURNING key;",
+        "options": {
+          "queryReplacement": "={{ [$('Alert Embeds').first().json.alerted_keys] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "CREDENTIAL_ID",
+          "name": "Postgres account"
+        }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "5ada8bea-1fed-4600-a99c-a0c63225f4ba",
+      "name": "Return Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        200
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('When Called').first().json;\nconst a = $('Alert Embeds').first().json;\nconst stages = { ...(ctx.stages ?? {}), alerts: { candidates: a.candidates, new_findings: a.new_findings, silent_fixes: a.silent_fixes } };\nreturn [{ json: { ...ctx, stages } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Ensure Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure Schema": {
+      "main": [
+        [
+          {
+            "node": "Read Triaged",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Triaged": {
+      "main": [
+        [
+          {
+            "node": "Build Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Rows": {
+      "main": [
+        [
+          {
+            "node": "Record New Findings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record New Findings": {
+      "main": [
+        [
+          {
+            "node": "Alert Embeds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert Embeds": {
+      "main": [
+        [
+          {
+            "node": "Post Run Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Run Summary": {
+      "main": [
+        [
+          {
+            "node": "Silent Fixes?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Silent Fixes?": {
+      "main": [
+        [
+          {
+            "node": "Post Silent Fixes",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Alerted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Silent Fixes": {
+      "main": [
+        [
+          {
+            "node": "Mark Alerted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Alerted": {
+      "main": [
+        [
+          {
+            "node": "Return Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [
+    {
+      "id": "1aeeb14a-bb00-4d88-8691-881d09b72431",
+      "name": "Record and dedupe",
+      "nodeIds": [
+        "6ceed52c-843a-457b-a5ba-a01314e36022",
+        "04fa80dd-c22f-4555-a978-7c3b785cfe27",
+        "c3886e77-e5c8-46ff-9e6e-2f491d81f574",
+        "ee65cf9f-ac94-4920-be20-9c1a079a4b72"
+      ],
+      "description": "pd_findings in Postgres keyed by stable hash; only keys not seen before count as new. silent_fix = LLM >= threshold and no advisory."
+    },
+    {
+      "id": "52da6b45-ebdc-4b7e-bed8-6757effe0cd7",
+      "name": "Discord",
+      "nodeIds": [
+        "f987e808-cbe9-4982-bbd7-0803651d0c91",
+        "66d7fc95-deb2-4432-b97d-edfbf207bfbc",
+        "ef133bd9-efdd-4b68-b092-ad6a59c75a90",
+        "282d0248-013a-445f-bea6-1f1d44028d68",
+        "cb7b3412-201e-4c1b-a929-8245d6feb6c5"
+      ],
+      "description": "One summary per run (top 5) to #n8n-alerts, plus a separate @here message for new silent-fix candidates."
+    }
+  ],
+  "sourceWorkflowId": null,
+  "tags": []
+}

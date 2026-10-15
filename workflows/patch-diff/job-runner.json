@@ -1,0 +1,203 @@
+{
+  "id": "coiPnEwpk6qgJgxW",
+  "name": "PD · Job Runner",
+  "description": "Runs a PD stage script detached under timeout in a /opt/loot/patchdiff job dir, polls until done, returns result.json. rc 124 = timed out (partial), other non-zero throws.",
+  "active": true,
+  "nodes": [
+    {
+      "id": "111f7846-95e1-40f1-9a5b-268cbba75d37",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "job_dir",
+              "type": "string"
+            },
+            {
+              "name": "script",
+              "type": "string"
+            },
+            {
+              "name": "max_minutes",
+              "type": "number"
+            },
+            {
+              "name": "remote_host",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "bf3e42f3-3a44-41d4-ac40-d2a9b5ea7ffb",
+      "name": "Validate Job",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const j = $input.first().json;\nconst DIR_RE = /^\\/opt\\/loot\\/patchdiff\\/[a-z0-9][a-z0-9_-]{0,39}\\/(\\d{8}T\\d{6}Z-[0-9a-f]{4})\\/[a-z_]{2,20}$/;\nconst m = DIR_RE.exec(String(j.job_dir ?? ''));\nif (!m) throw new Error(`Refusing job_dir: ${j.job_dir}`);\nif (!j.script || typeof j.script !== 'string') throw new Error('No script supplied');\nconst remote_host = String(j.remote_host ?? '').trim();\nif (remote_host && !/^(\\d{1,3}\\.){3}\\d{1,3}$/.test(remote_host)) throw new Error(`Refusing remote_host: ${remote_host}`);\nconst max = Math.min(Math.max(parseInt(j.max_minutes ?? 240, 10) || 240, 1), 720);\nconst script_b64 = Buffer.from(j.script, 'utf8').toString('base64');\nif (script_b64.length > 100000) throw new Error(`Script too large for command line (${script_b64.length} bytes)`);\nreturn [{ json: { job_dir: j.job_dir, stage: j.job_dir.split('/').pop(), run_id: m[1], remote_host, max_minutes: max, script_b64 } }];\n"
+      }
+    },
+    {
+      "id": "801c743d-3288-47d1-a2dc-7be17ec64294",
+      "name": "Launch Job",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "executeOnce": true,
+        "command": "=PD_SH=$(cat <<'PD_SH_EOF'\nH='{{ $json.remote_host }}'\nK='/dev/shm/pd-ssh/{{ $json.run_id }}'\nread -r -d '' JOB <<'PD_JOB' || true\nD='{{ $json.job_dir }}'\ncase \"$D\" in /opt/loot/patchdiff/*/*/*) ;; *) echo 'bad job dir' >&2; exit 1;; esac\numask 027\nmkdir -p \"$D\" && cd \"$D\" || exit 1\nrm -f .done result.json\nprintf '%s' '{{ $json.script_b64 }}' | base64 -d > job.sh\nsetsid nohup bash -c 'timeout {{ $json.max_minutes }}m bash job.sh > job.log 2>&1; echo $? > .done' > /dev/null 2>&1 < /dev/null &\necho '{\"launched\":true}'\nPD_JOB\nif [ -n \"$H\" ]; then\n  printf '%s\\n' \"$JOB\" | ssh -i \"$K/id\" -o UserKnownHostsFile=\"$K/known_hosts\" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 root@\"$H\" 'runuser -u n8n -- bash -s'\nelse\n  printf '%s\\n' \"$JOB\" | bash -s\nfi\nPD_SH_EOF\n)\nexec bash -c \"$PD_SH\""
+      }
+    },
+    {
+      "id": "72257676-0f13-4ef5-b5b5-ddf259a66388",
+      "name": "Poll Job",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "executeOnce": true,
+        "command": "=PD_SH=$(cat <<'PD_SH_EOF'\nH='{{ $('Validate Job').first().json.remote_host }}'\nK='/dev/shm/pd-ssh/{{ $('Validate Job').first().json.run_id }}'\nread -r -d '' JOB <<'PD_JOB' || true\ncd '{{ $('Validate Job').first().json.job_dir }}' || exit 1\nfor i in $(seq 1 22); do [ -f .done ] && break; sleep 5; done\nif [ ! -f .done ]; then echo '{\"done\":false}'; exit 0; fi\nrc=$(tr -dc 0-9 < .done); [ -n \"$rc\" ] || rc=1\nif jq -e . result.json >/dev/null 2>&1; then res=$(jq -c . result.json); else res=null; fi\njq -nc --argjson rc \"$rc\" --argjson r \"$res\" --arg tail \"$(tail -c 1500 job.log 2>/dev/null)\" '{done: true, rc: $rc, result: $r, log_tail: $tail}'\nPD_JOB\nif [ -z \"$H\" ]; then printf '%s\\n' \"$JOB\" | bash -s; exit $?; fi\n# Polls are idempotent, so ride out short SSH drops on long remote stages.\nfor attempt in 1 2 3 4 5; do\n  out=$(printf '%s\\n' \"$JOB\" | ssh -i \"$K/id\" -o UserKnownHostsFile=\"$K/known_hosts\" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=4 root@\"$H\" 'runuser -u n8n -- bash -s') && { printf '%s\\n' \"$out\"; exit 0; }\n  rc=$?\n  [ \"$rc\" -ne 255 ] && exit \"$rc\"\n  sleep 15\ndone\necho \"ssh to $H failed 5 times\" >&2\nexit 255\nPD_SH_EOF\n)\nexec bash -c \"$PD_SH\""
+      }
+    },
+    {
+      "id": "d06c15fb-b6fa-4595-ad9c-ff490192cdfe",
+      "name": "Job Finished?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ JSON.parse($json.stdout).done }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "0c62e440-42e8-4818-8cec-c388f6aa4c9e",
+      "name": "Job Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -100
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const job = $('Validate Job').first().json;\nconst r = JSON.parse($input.first().json.stdout);\nconst timedOut = r.rc === 124;\nif (r.rc !== 0 && !timedOut) {\n  const tail = String(r.log_tail ?? '').replace(/\\s+/g, ' ').trim().slice(-800);\n  throw new Error(`Stage ${job.stage} failed (rc=${r.rc}). Log tail: ${tail}`);\n}\nreturn [{ json: { stage: job.stage, job_dir: job.job_dir, rc: r.rc, timed_out: timedOut, result: r.result ?? {} } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Validate Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Job": {
+      "main": [
+        [
+          {
+            "node": "Launch Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Launch Job": {
+      "main": [
+        [
+          {
+            "node": "Poll Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Poll Job": {
+      "main": [
+        [
+          {
+            "node": "Job Finished?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Job Finished?": {
+      "main": [
+        [
+          {
+            "node": "Job Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Poll Job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [],
+  "sourceWorkflowId": null,
+  "tags": []
+}

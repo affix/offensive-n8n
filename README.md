@@ -128,9 +128,10 @@ docker run --rm -v /opt/loot:/loot projectdiscovery/katana:v1.8.0 -u https://exa
 | [`asm-pipeline`](workflows/asm-pipeline/README.md) | External attack surface pipeline: scoped discovery, takeover checks, port scans, web fingerprinting, diffing, vuln checks, Ollama triage and Discord alerts, plus CVE Watch, housekeeping, scope expiry and client PDF reports. |
 | [`wazuh-triage`](workflows/wazuh-triage/README.md) | Polls the Wazuh indexer, dedupes and suppresses high-severity alerts, enriches source IPs, LLM-triages the rest and pages only on escalations. Also analyses web honeypot payloads. |
 | [`subdomain-takeover`](workflows/subdomain-takeover/README.md) | Scheduled and one-off subdomain takeover monitoring for a list of root domains. |
+| [`patch-diff`](workflows/patch-diff/README.md) | Watches products for new releases, diffs each version against the last (source hunks or Ghidra function diffs), matches advisories, LLM-triages candidates and flags likely silent security fixes. Can offload the heavy stages to a throwaway DigitalOcean worker. |
 | [`threat-intel`](workflows/threat-intel/README.md) | IP reputation from AbuseIPDB, VirusTotal, GreyNoise and OTX, as a sub-workflow and an IP or domain report form. |
 
-The exports are sanitised. After importing, replace the placeholders (`OLLAMA_HOST`, `OLLAMA_MODEL`, `WAZUH_INDEXER`, `DISCORD_*`, `DATA_TABLE_*`, `CREDENTIAL_ID`) as described in each folder's README. Workflow IDs are kept so sub-workflow calls resolve, which also means importing into an instance that already has them overwrites the existing copies. The Wazuh workflows need the `postgres` role enabled.
+The exports are sanitised. After importing, replace the placeholders (`OLLAMA_HOST`, `OLLAMA_MODEL`, `WAZUH_INDEXER`, `DISCORD_*`, `DATA_TABLE_*`, `CREDENTIAL_ID`) as described in each folder's README. Workflow IDs are kept so sub-workflow calls resolve, which also means importing into an instance that already has them overwrites the existing copies. The Wazuh and patch diff workflows need the `postgres` role enabled.
 
 ## Patch diffing
 

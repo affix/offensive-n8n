@@ -1,0 +1,1074 @@
+{
+  "id": "znR5VjAmOSkzkEXm",
+  "name": "PD · Worker",
+  "description": "On-demand DigitalOcean worker for PD runs with options.remote: brings up a droplet from the latest pd-worker-* snapshot, pulls results back, tears it down; hourly reaper for stragglers.",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "op"
+            },
+            {
+              "name": "ctx",
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "id": "953ab50b-73aa-44b5-ab87-5ef9e3ecdf89",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const PROJECT_ID = 'DO_PROJECT_ID';\nconst first = $input.first().json;\nconst op = 'op' in first ? String(first.op ?? '') : 'reap';\nif (!['up', 'pull', 'down', 'reap'].includes(op)) throw new Error(`Unknown worker op: ${op}`);\nif (op === 'reap') return [{ json: { op, route: 'reap', max_age_hours: 24 } }];\nconst ctx = typeof first.ctx === 'string' ? JSON.parse(first.ctx) : (first.ctx ?? {});\nconst opts = ctx.options ?? {};\nconst remote = opts.remote === true || opts.remote === 'true';\nconst run_id = String(ctx.run_id ?? '');\nif (!/^\\d{8}T\\d{6}Z-[0-9a-f]{4}$/.test(run_id)) throw new Error(`Bad run_id: ${run_id}`);\nconst run_dir = String(ctx.run_dir ?? '');\nif (!/^\\/opt\\/loot\\/patchdiff\\/[a-z0-9][a-z0-9_-]{0,39}\\/\\d{8}T\\d{6}Z-[0-9a-f]{4}$/.test(run_dir)) throw new Error(`Bad run_dir: ${run_dir}`);\nconst size = String(opts.do_size ?? 'c-8');\nconst region = String(opts.do_region ?? '');\nif (!/^[a-z0-9-]{2,40}$/.test(size) || (region && !/^[a-z0-9]{3,8}$/.test(region))) throw new Error('Bad do_size or do_region in options');\nconst remote_host = String(ctx.remote_host ?? '');\nif (remote_host && !/^(\\d{1,3}\\.){3}\\d{1,3}$/.test(remote_host)) throw new Error(`Bad remote_host: ${remote_host}`);\nreturn [{ json: {\n  op, route: remote ? op : 'local', ctx, run_id, run_dir, remote_host,\n  tag: `pd-run-${run_id}`, name: `pd-${run_id.toLowerCase()}`, key_dir: `/dev/shm/pd-ssh/${run_id}`,\n  size, region, snapshot_prefix: 'pd-worker-', project_id: PROJECT_ID\n} }];\n"
+      },
+      "id": "75feba74-0439-4e01-bf17-19f074911099",
+      "name": "Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "triggerAtMinute": 41
+            }
+          ]
+        }
+      },
+      "id": "60b4299c-ddaf-43f4-8eb0-21a10c01e6f6",
+      "name": "Hourly Reaper",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        704
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "expression",
+        "numberOutputs": 5,
+        "output": "={{ ({ local: 0, up: 1, pull: 2, down: 3, reap: 4 })[$json.route] }}"
+      },
+      "id": "c3c890e9-f9b6-4b5e-8e73-cdd144b4b47d",
+      "name": "Route",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        448,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $('Plan').first().json;\nreturn [{ json: p.op === 'up' ? { ...p.ctx, remote_host: '' } : p.ctx }];\n"
+      },
+      "id": "60c95451-e4be-4723-b2ec-898163a12413",
+      "name": "Return Local",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=K='{{ $json.key_dir }}'\ncase \"$K\" in /dev/shm/pd-ssh/[0-9]*) ;; *) echo 'bad key dir' >&2; exit 1;; esac\numask 077\nmkdir -p \"$K\"\nrm -f \"$K/id\" \"$K/id.pub\" \"$K/known_hosts\"\nssh-keygen -q -t ed25519 -N '' -C 'pd-{{ $json.run_id }}' -f \"$K/id\"\ncat \"$K/id.pub\""
+      },
+      "id": "2de98d98-60b5-498e-b769-0b311057dac1",
+      "name": "Make Key",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        672,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.ipify.org?format=json",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "f420ad67-0b92-4d6b-9741-60827e994a06",
+      "name": "Pi Public IP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.digitalocean.com/v2/snapshots?resource_type=droplet&per_page=200",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "87cee0f4-cae9-4ef2-95cb-f08889f2c27a",
+      "name": "List Snapshots",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1104,
+        48
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "DO Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.digitalocean.com/v2/firewalls?per_page=200",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "4280b23a-337a-4f80-ab17-6d969b6442f7",
+      "name": "List Firewalls",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1328,
+        48
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "DO Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.digitalocean.com/v2/account/keys?per_page=200",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "2a14ab33-11f1-43c6-a491-f5323fdf9700",
+      "name": "List Keys",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1552,
+        48
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "DO Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $('Plan').first().json;\nconst pub = String($('Make Key').first().json.stdout ?? '').trim();\nif (!/^ssh-ed25519 [A-Za-z0-9+/=]+ pd-/.test(pub)) throw new Error('Run key was not generated');\nconst ip = String($('Pi Public IP').first().json.ip ?? '');\nif (!/^(\\d{1,3}\\.){3}\\d{1,3}$/.test(ip)) throw new Error(`Could not resolve the Pi's public IPv4 (${ip})`);\nconst snaps = ($('List Snapshots').first().json.snapshots ?? [])\n  .filter((s) => String(s.name).startsWith(p.snapshot_prefix))\n  .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));\nif (!snaps.length) throw new Error(`No ${p.snapshot_prefix}* snapshot; build one with pd-worker.yml`);\nconst snap = snaps[0];\nconst region = p.region || snap.regions[0];\nif (!snap.regions.includes(region)) throw new Error(`Snapshot ${snap.name} is not in ${region} (has ${snap.regions.join(', ')})`);\nconst fw = ($('List Firewalls').first().json.firewalls ?? []).find((f) => f.name === 'pd-worker');\nif (!fw) throw new Error('DO firewall pd-worker is missing; run the worker setup');\nconst key = ($('List Keys').first().json.ssh_keys ?? []).find((k) => k.name === 'pd-worker-bootstrap');\nif (!key) throw new Error('DO SSH key pd-worker-bootstrap is missing; run the worker setup');\nconst user_data = ['#cloud-config', 'ssh_authorized_keys:', `  - ${pub}`, ''].join('\\n');\nconst firewall_body = {\n  name: fw.name, tags: ['pd-worker'], droplet_ids: [],\n  inbound_rules: [{ protocol: 'tcp', ports: '22', sources: { addresses: [`${ip}/32`] } }],\n  outbound_rules: fw.outbound_rules\n};\nconst droplet_body = {\n  name: p.name, region, size: p.size, image: Number(snap.id), ssh_keys: [key.id],\n  tags: ['pd-worker', p.tag], user_data, ipv6: false, monitoring: false\n};\nreturn [{ json: { firewall_id: fw.id, firewall_body, droplet_body, snapshot: snap.name, region, pi_ip: ip } }];\n"
+      },
+      "id": "1cc880bf-b76c-4bab-be06-07de3acad899",
+      "name": "Droplet Spec",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.digitalocean.com/v2/firewalls/{{ $json.firewall_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Droplet Spec').first().json.firewall_body) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "68c79b79-05a5-47ff-ab73-376eba70f7e1",
+      "name": "Allow Pi SSH",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1984,
+        48
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "DO Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.digitalocean.com/v2/droplets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Droplet Spec').first().json.droplet_body) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "7d8e21f2-826f-4c49-9b88-6edd862cba9e",
+      "name": "Create Droplet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2208,
+        48
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "DO Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.digitalocean.com/v2/projects/{{ $('Plan').first().json.project_id }}/resources",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ resources: ['do:droplet:' + $json.droplet.id] }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "1188e84b-aa12-4e5a-8dfb-0bc377121ef7",
+      "name": "Assign Project",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2432,
+        48
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "DO Token"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "amount": 20
+      },
+      "id": "d111ecf0-15e6-47ee-b607-13c44235ea51",
+      "name": "Wait For Boot",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2640,
+        208
+      ],
+      "webhookId": "c62be634-6c59-48be-8633-26dacd563a51"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.digitalocean.com/v2/droplets/{{ $('Create Droplet').first().json.droplet.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "32ddf8ea-a69b-4b50-8567-af8a8fb5a599",
+      "name": "Get Droplet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2864,
+        208
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "DO Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.droplet.status === 'active' && ($json.droplet.networks.v4 || []).some(n => n.type === 'public') }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1d484978-1924-41b6-ac46-b94bc5230357",
+      "name": "Droplet Ready?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3088,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=PD_SH=$(cat <<'PD_SH_EOF'\nK='{{ $('Plan').first().json.key_dir }}'\nR='{{ $('Plan').first().json.run_dir }}'\nH='{{ $json.droplet.networks.v4.filter(n => n.type === \"public\").map(n => n.ip_address)[0] }}'\ncase \"$H\" in *[!0-9.]*|'') echo \"bad worker address $H\" >&2; exit 1;; esac\nO=(-i \"$K/id\" -o UserKnownHostsFile=\"$K/known_hosts\" -o BatchMode=yes -o ConnectTimeout=10)\n# First contact pins the host key (per-run known_hosts in RAM); everything after is strict.\nok=0\nfor i in $(seq 1 45); do\n  if ssh \"${O[@]}\" -o StrictHostKeyChecking=accept-new root@\"$H\" true 2>/dev/null; then ok=1; break; fi\n  sleep 8\ndone\n[ \"$ok\" = 1 ] || { echo \"worker $H never accepted SSH\" >&2; exit 1; }\nssh \"${O[@]}\" -o StrictHostKeyChecking=yes root@\"$H\" 'cloud-init status --wait >/dev/null 2>&1; test -x /opt/patchdiff/bin/pd' || { echo \"worker $H has no /opt/patchdiff/bin/pd\" >&2; exit 1; }\n# Stage scripts follow the Pi, so the snapshot only needs rebuilding for tool or dependency changes.\nset -o pipefail\ntar -C /opt/patchdiff/bin -cf - --exclude=__pycache__ . | ssh \"${O[@]}\" -o StrictHostKeyChecking=yes root@\"$H\" 'tar -C /opt/patchdiff/bin -xf - --no-same-owner && chown -R root:root /opt/patchdiff/bin' || { echo \"could not sync /opt/patchdiff/bin to $H\" >&2; exit 1; }\nssh \"${O[@]}\" -o StrictHostKeyChecking=yes root@\"$H\" \"runuser -u n8n -- bash -c 'umask 027; mkdir -p \\\"$R\\\" && cat > \\\"$R/config.json\\\"'\" < \"$R/config.json\"\nprintf '{\"host\":\"%s\"}\\n' \"$H\"\nPD_SH_EOF\n)\nexec bash -c \"$PD_SH\""
+      },
+      "id": "8c51976d-a1c3-4fcb-a20a-b10fd5ee603c",
+      "name": "Connect Worker",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        3312,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $('Plan').first().json;\nconst host = JSON.parse($input.first().json.stdout).host;\nconst spec = $('Droplet Spec').first().json;\nconst d = $('Create Droplet').first().json.droplet ?? {};\nreturn [{ json: { ...p.ctx, remote_host: host, worker: { droplet_id: d.id, name: d.name, size: spec.droplet_body.size, region: spec.region, snapshot: spec.snapshot } } }];\n"
+      },
+      "id": "49e8e622-e6bc-486d-8766-75fa06c9476f",
+      "name": "Return Up",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3520,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "if ($runIndex >= 40) throw new Error('Worker droplet did not become active with a public IPv4 within ~14 minutes');\nreturn $input.all();\n"
+      },
+      "id": "a4bc949b-d287-4967-a51c-2903ec2a5159",
+      "name": "Retry Guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3088,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "command": "=PD_SH=$(cat <<'PD_SH_EOF'\nK='{{ $json.key_dir }}'\nR='{{ $json.run_dir }}'\nH='{{ $json.remote_host }}'\ncase \"$H\" in *[!0-9.]*|'') echo \"bad worker address $H\" >&2; exit 1;; esac\numask 027\nset -o pipefail\n# Results only: decompiled trees and unpacked artefacts stay on the worker and die with it.\nssh -i \"$K/id\" -o UserKnownHostsFile=\"$K/known_hosts\" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=20 root@\"$H\" \\\n  \"runuser -u n8n -- tar -C '$R' -cf - --exclude=unpack/src --exclude=unpack/unpacked --exclude=job.sh fetch unpack diff\" \\\n  | tar -C \"$R\" -xf - --no-same-owner --no-same-permissions\ndu -sk \"$R\" | awk '{printf \"{\\\"pulled_kb\\\":%s}\\n\", $1}'\nPD_SH_EOF\n)\nexec bash -c \"$PD_SH\""
+      },
+      "id": "29781944-26c0-4817-b120-0f1227a5a2b3",
+      "name": "Pull Results",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        736,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: $('Plan').first().json.ctx }];\n"
+      },
+      "id": "fea4237c-04c0-4d7b-be0b-16bc089f8e8a",
+      "name": "Return Pulled",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://api.digitalocean.com/v2/droplets?tag_name={{ $json.tag }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "2891b2a1-0a45-4157-aa3f-587fb118212c",
+      "name": "Delete Droplet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1168,
+        624
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "DO Token"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "command": "=K='{{ $('Plan').first().json.key_dir }}'\ncase \"$K\" in /dev/shm/pd-ssh/[0-9]*) ;; *) echo 'bad key dir' >&2; exit 1;; esac\nrm -rf -- \"$K\"\necho '{\"key_removed\":true}'"
+      },
+      "id": "653889e6-3d89-46c0-93d7-994994e5d811",
+      "name": "Remove Run Key",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1376,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $('Plan').first().json;\nconst del = $('Delete Droplet').first().json;\nconst failed = Boolean(del && del.error);\nconst embed = failed ? {\n  title: `⚠️ PD worker teardown failed · ${p.ctx.product}`,\n  color: 0xE67E22,\n  description: `Could not delete droplets tagged \\`${p.tag}\\`. The hourly reaper will retry; check DigitalOcean if it persists.\\n\\`\\`\\`\\n${String(del.error.message ?? del.error).slice(0, 600)}\\n\\`\\`\\``,\n  footer: { text: `PD · Worker · ${p.run_id}` }, timestamp: new Date().toISOString()\n} : null;\nreturn [{ json: { ...p.ctx, worker_torn_down: !failed, notify: failed, embed } }];\n"
+      },
+      "id": "0e4f61a9-f144-4228-8759-3d31240331cc",
+      "name": "Down Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.notify }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "56d8965b-8817-4343-9165-96202c61631b",
+      "name": "Teardown Failed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1824,
+        624
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "id": "e2870a04-5498-4871-bfa1-9c61a5aedb60",
+      "name": "Post Teardown Problem",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        576
+      ],
+      "webhookId": "88e9a239-7023-4f55-b506-e65dd21897e9",
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.digitalocean.com/v2/droplets?tag_name=pd-worker&per_page=200",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "3306828f-8262-4908-a218-fb1667dbd93b",
+      "name": "List Workers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        672,
+        800
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "DO Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const p = $('Plan').first().json;\nconst now = Date.now();\nconst old = ($input.first().json.droplets ?? []).filter((d) => now - Date.parse(d.created_at) > p.max_age_hours * 3600000);\nreturn old.map((d) => ({ json: { id: d.id, name: d.name, created_at: d.created_at, tags: d.tags } }));\n"
+      },
+      "id": "a32ddd85-9c96-4846-b680-f97bc8e51083",
+      "name": "Reap Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=https://api.digitalocean.com/v2/droplets/{{ $json.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "58897606-7167-43a9-9815-67114ec29274",
+      "name": "Delete Stale Worker",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1104,
+        800
+      ],
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "CREDENTIAL_ID",
+          "name": "DO Token"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const all = $('Reap Plan').all().map((i) => i.json);\nconst errs = $input.all().filter((i) => i.json.error).length;\nreturn [{ json: { embed: {\n  title: '🧹 PD worker reaper',\n  color: errs ? 0x9B111E : 0xE67E22,\n  description: `Deleted ${all.length - errs} worker droplet(s) older than ${$('Plan').first().json.max_age_hours}h${errs ? `, ${errs} failed` : ''}:\\n` + all.map((d) => `\\`${d.name}\\` (${d.created_at})`).join('\\n').slice(0, 1500),\n  footer: { text: 'PD · Worker reaper' }, timestamp: new Date().toISOString()\n} } }];\n"
+      },
+      "id": "573fe078-636d-46ae-80f8-6840d29a78a1",
+      "name": "Reap Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1328,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "DISCORD_GUILD_ID",
+          "mode": "list",
+          "cachedResultName": "Alerts"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "DISCORD_ALERTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "n8n-alerts"
+        },
+        "options": {},
+        "embeds": {
+          "values": [
+            {
+              "inputMethod": "json",
+              "json": "={{ JSON.stringify($json.embed) }}"
+            }
+          ]
+        }
+      },
+      "id": "bcf264f6-fb0f-440f-83eb-78a40455c24e",
+      "name": "Post Reaped",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1552,
+        800
+      ],
+      "webhookId": "d4a65177-a749-4d84-b0cc-cbf44de5da67",
+      "credentials": {
+        "discordBotApi": {
+          "id": "CREDENTIAL_ID",
+          "name": "Discord Bot account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan": {
+      "main": [
+        [
+          {
+            "node": "Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hourly Reaper": {
+      "main": [
+        [
+          {
+            "node": "Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route": {
+      "main": [
+        [
+          {
+            "node": "Return Local",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Make Key",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pull Results",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Delete Droplet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "List Workers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Make Key": {
+      "main": [
+        [
+          {
+            "node": "Pi Public IP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pi Public IP": {
+      "main": [
+        [
+          {
+            "node": "List Snapshots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Snapshots": {
+      "main": [
+        [
+          {
+            "node": "List Firewalls",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Firewalls": {
+      "main": [
+        [
+          {
+            "node": "List Keys",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Keys": {
+      "main": [
+        [
+          {
+            "node": "Droplet Spec",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Droplet Spec": {
+      "main": [
+        [
+          {
+            "node": "Allow Pi SSH",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Allow Pi SSH": {
+      "main": [
+        [
+          {
+            "node": "Create Droplet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Droplet": {
+      "main": [
+        [
+          {
+            "node": "Assign Project",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign Project": {
+      "main": [
+        [
+          {
+            "node": "Wait For Boot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait For Boot": {
+      "main": [
+        [
+          {
+            "node": "Get Droplet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Droplet": {
+      "main": [
+        [
+          {
+            "node": "Droplet Ready?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Droplet Ready?": {
+      "main": [
+        [
+          {
+            "node": "Connect Worker",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry Guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Connect Worker": {
+      "main": [
+        [
+          {
+            "node": "Return Up",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry Guard": {
+      "main": [
+        [
+          {
+            "node": "Wait For Boot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pull Results": {
+      "main": [
+        [
+          {
+            "node": "Return Pulled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Droplet": {
+      "main": [
+        [
+          {
+            "node": "Remove Run Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove Run Key": {
+      "main": [
+        [
+          {
+            "node": "Down Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Down Result": {
+      "main": [
+        [
+          {
+            "node": "Teardown Failed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Teardown Failed?": {
+      "main": [
+        [
+          {
+            "node": "Post Teardown Problem",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Workers": {
+      "main": [
+        [
+          {
+            "node": "Reap Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reap Plan": {
+      "main": [
+        [
+          {
+            "node": "Delete Stale Worker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Stale Worker": {
+      "main": [
+        [
+          {
+            "node": "Reap Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reap Summary": {
+      "main": [
+        [
+          {
+            "node": "Post Reaped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "errorWorkflow": "PpGzaQp9DxQSRshR",
+    "timezone": "Europe/London",
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "nodeGroups": [
+    {
+      "id": "08994f36-8c5d-4da8-abd3-686adb9b2f91",
+      "name": "Bring up worker",
+      "nodeIds": [
+        "2de98d98-60b5-498e-b769-0b311057dac1",
+        "f420ad67-0b92-4d6b-9741-60827e994a06",
+        "87cee0f4-cae9-4ef2-95cb-f08889f2c27a",
+        "4280b23a-337a-4f80-ab17-6d969b6442f7",
+        "2a14ab33-11f1-43c6-a491-f5323fdf9700",
+        "1cc880bf-b76c-4bab-be06-07de3acad899",
+        "68c79b79-05a5-47ff-ab73-376eba70f7e1",
+        "7d8e21f2-826f-4c49-9b88-6edd862cba9e",
+        "1188e84b-aa12-4e5a-8dfb-0bc377121ef7"
+      ],
+      "description": "RAM-only run key, latest pd-worker-* snapshot, firewall SSH from the Pi only, droplet tagged pd-run-<run_id> in the DO project."
+    },
+    {
+      "id": "ed88271a-ae79-4838-86c5-2da6141caa51",
+      "name": "Wait and connect",
+      "nodeIds": [
+        "d111ecf0-15e6-47ee-b607-13c44235ea51",
+        "32ddf8ea-a69b-4b50-8567-af8a8fb5a599",
+        "1d484978-1924-41b6-ac46-b94bc5230357",
+        "a4bc949b-d287-4967-a51c-2903ec2a5159",
+        "8c51976d-a1c3-4fcb-a20a-b10fd5ee603c",
+        "49e8e622-e6bc-486d-8766-75fa06c9476f"
+      ],
+      "description": "Polls until active with a public IPv4, pins the host key on first contact, copies config.json across."
+    },
+    {
+      "id": "50749aed-dd68-41eb-a8b5-66fd789bbea6",
+      "name": "Tear down",
+      "nodeIds": [
+        "2891b2a1-0a45-4157-aa3f-587fb118212c",
+        "653889e6-3d89-46c0-93d7-994994e5d811",
+        "0e4f61a9-f144-4228-8759-3d31240331cc",
+        "56d8965b-8817-4343-9165-96202c61631b",
+        "e2870a04-5498-4871-bfa1-9c61a5aedb60"
+      ],
+      "description": "Deletes droplets by run tag and the RAM key; posts to n8n-alerts if the delete fails."
+    },
+    {
+      "id": "08d32518-7e45-479e-8969-299c640fe72f",
+      "name": "Hourly reaper",
+      "nodeIds": [
+        "3306828f-8262-4908-a218-fb1667dbd93b",
+        "a32ddd85-9c96-4846-b680-f97bc8e51083",
+        "58897606-7167-43a9-9815-67114ec29274",
+        "573fe078-636d-46ae-80f8-6840d29a78a1",
+        "bcf264f6-fb0f-440f-83eb-78a40455c24e"
+      ],
+      "description": "Deletes pd-worker droplets older than 24h in case a run died without tearing down."
+    }
+  ],
+  "sourceWorkflowId": null,
+  "tags": []
+}
